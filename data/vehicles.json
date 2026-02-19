@@ -1,0 +1,34 @@
+[
+  {
+    "vehicle_id": "v1",
+    "make": "BMW",
+    "model": "M3",
+    "year": 2020,
+    "mileage": 25000,
+    "price": 52000
+  },
+  {
+    "vehicle_id": "v2",
+    "make": "BMW",
+    "model": "340i",
+    "year": 2019,
+    "mileage": 40000,
+    "price": 32000
+  },
+  {
+    "vehicle_id": "v3",
+    "make": "BMW",
+    "model": "328i",
+    "year": 2018,
+    "mileage": 55000,
+    "price": 22000
+  },
+  {
+    "vehicle_id": "v4",
+    "make": "BMW",
+    "model": "M5",
+    "year": 2021,
+    "mileage": 15000,
+    "price": 95000
+  }
+]

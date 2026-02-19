@@ -1,0 +1,12 @@
+{
+  "comment": "When external lookups are allowed (P2/P3), only these domains are permitted",
+  "allowed_domains": [
+    "kbb.com",
+    "edmunds.com",
+    "nadaguides.com",
+    "cars.com",
+    "autotrader.com",
+    "manheim.com"
+  ],
+  "block_all_external_by_default": true
+}

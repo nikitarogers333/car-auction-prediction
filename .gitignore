@@ -1,0 +1,40 @@
+# Environment and secrets
+.env
+*.key
+*.env.local
+OPENAI_API_KEY
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Data and outputs (keep structure, ignore large files)
+data/*.xlsx
+data/*.xls
+!data/template.xlsx
+eval/*.json
+logs/*.jsonl
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PDFs (large)
+textbook pdfs/
+*.pdf
+
+# Temporary
+*.tmp
+*.log

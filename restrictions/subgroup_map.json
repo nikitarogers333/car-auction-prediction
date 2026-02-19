@@ -1,0 +1,43 @@
+{
+  "comment": "Strict subgroup mapping: allowed_comparables and forbidden cross-subgroup usage",
+  "rules": [
+    {
+      "make": "BMW",
+      "model_pattern": "M3",
+      "subgroup": "M3",
+      "allowed_comparables": ["M3", "M4"],
+      "forbidden_comparables": ["340i", "328i", "330i", "generic"]
+    },
+    {
+      "make": "BMW",
+      "model_pattern": "340i",
+      "subgroup": "340i",
+      "allowed_comparables": ["340i", "330i", "328i"],
+      "forbidden_comparables": ["M3", "M4", "M5"]
+    },
+    {
+      "make": "BMW",
+      "model_pattern": "328i",
+      "subgroup": "328i",
+      "allowed_comparables": ["328i", "330i", "340i"],
+      "forbidden_comparables": ["M3", "M4", "M5"]
+    },
+    {
+      "make": "BMW",
+      "model_pattern": "M5",
+      "subgroup": "M5",
+      "allowed_comparables": ["M5", "M3", "M4"],
+      "forbidden_comparables": ["340i", "328i", "330i"]
+    },
+    {
+      "make": "BMW",
+      "model_pattern": "default",
+      "subgroup": "generic",
+      "allowed_comparables": ["generic", "340i", "328i"],
+      "forbidden_comparables": ["M3", "M4", "M5"]
+    }
+  ],
+  "default_subgroup": "generic",
+  "default_allowed": ["generic"],
+  "default_forbidden": []
+}

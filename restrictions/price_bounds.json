@@ -1,0 +1,11 @@
+{
+  "comment": "Sanity bounds per make/model (optional). Output outside bounds can be rejected.",
+  "default_min_price": 1000,
+  "default_max_price": 500000,
+  "by_make_model": {
+    "BMW_M3": { "min": 20000, "max": 150000 },
+    "BMW_340i": { "min": 15000, "max": 80000 },
+    "BMW_328i": { "min": 8000, "max": 45000 },
+    "BMW_M5": { "min": 50000, "max": 200000 }
+  }
+}

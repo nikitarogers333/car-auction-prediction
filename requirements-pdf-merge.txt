@@ -1,0 +1,2 @@
+# For merge_relevant_pages.py
+pypdf>=4.0.0
