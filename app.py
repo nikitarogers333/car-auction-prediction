@@ -17,7 +17,7 @@ import pandas as pd
 from flask import Flask, render_template_string, request, send_file
 
 from config import CONDITIONS
-from data_loader import load_from_excel
+from data_loader import load_from_file
 from pipeline import run_pipeline
 
 app = Flask(__name__)
@@ -59,11 +59,11 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <h1>Car Auction Price Prediction Pipeline</h1>
-    <p>Upload an Excel file (.xlsx) with columns: vehicle_id (or id), make, model, year, mileage, price (optional).</p>
+    <p>Upload a file: Excel (.xlsx, .xls), CSV (.csv), TSV (.tsv), or JSON (.json, .jsonl). Columns: vehicle_id (or id), make, model, year, mileage, price (optional). Order doesn't matter.</p>
     
     <div class="upload">
         <form method="post" enctype="multipart/form-data">
-            <input type="file" name="file" accept=".xlsx,.xls" required>
+            <input type="file" name="file" accept=".xlsx,.xls,.csv,.tsv,.txt,.json,.jsonl" required>
             <br><br>
             <label>Condition: 
                 <select name="condition">
@@ -79,7 +79,11 @@ HTML_TEMPLATE = """
     </div>
     
     {% if template_link %}
-    <p><a href="{{ template_link }}" class="btn">Download Excel Template</a></p>
+    <p>
+        <a href="{{ template_link }}" class="btn">Download Excel Template</a>
+        <a href="/create_template_csv" class="btn">Download CSV Template</a>
+        — or use your own file (CSV, TSV, JSON) with make, model, year.
+    </p>
     {% endif %}
     
     {% if error %}
@@ -138,16 +142,20 @@ def index():
         file = request.files["file"]
         if file.filename == "":
             return render_template_string(HTML_TEMPLATE, error="No file selected")
-        if not file.filename.lower().endswith((".xlsx", ".xls")):
-            return render_template_string(HTML_TEMPLATE, error="File must be .xlsx or .xls")
+        allowed = (".xlsx", ".xls", ".csv", ".tsv", ".txt", ".json", ".jsonl")
+        if not file.filename or not file.filename.lower().endswith(allowed):
+            return render_template_string(HTML_TEMPLATE, error=f"File must be one of: {', '.join(allowed)}")
         condition = request.form.get("condition", "P1")
         if condition not in CONDITIONS:
             condition = "P1"
         try:
-            with NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+            suffix = Path(file.filename).suffix or ".csv"
+            if suffix.lower() not in (".xlsx", ".xls", ".csv", ".tsv", ".txt", ".json", ".jsonl"):
+                suffix = ".csv"
+            with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 file.save(tmp.name)
                 tmp_path = Path(tmp.name)
-                vehicles = load_from_excel(tmp_path)
+                vehicles = load_from_file(tmp_path)
                 tmp_path.unlink()
             if not vehicles:
                 return render_template_string(HTML_TEMPLATE, error="No vehicles found in Excel file")
@@ -191,14 +199,17 @@ def download(filename: str):
     return "File not found", 404
 
 
-@app.route("/create_template")
-def create_template():
-    df = pd.DataFrame([
+def _template_df() -> pd.DataFrame:
+    return pd.DataFrame([
         {"vehicle_id": "v1", "make": "BMW", "model": "M3", "year": 2020, "mileage": 25000, "price": 52000},
         {"vehicle_id": "v2", "make": "BMW", "model": "340i", "year": 2019, "mileage": 40000, "price": 32000},
         {"vehicle_id": "v3", "make": "BMW", "model": "328i", "year": 2018, "mileage": 55000, "price": 22000},
     ])
-    # Generate template in-memory (more reliable on PaaS filesystems)
+
+
+@app.route("/create_template")
+def create_template():
+    df = _template_df()
     buf = BytesIO()
     df.to_excel(buf, index=False, engine="openpyxl")
     buf.seek(0)
@@ -207,6 +218,20 @@ def create_template():
         as_attachment=True,
         download_name="vehicles_template.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/create_template_csv")
+def create_template_csv():
+    df = _template_df()
+    buf = BytesIO()
+    df.to_csv(buf, index=False, encoding="utf-8")
+    buf.seek(0)
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name="vehicles_template.csv",
+        mimetype="text/csv",
     )
 
 
