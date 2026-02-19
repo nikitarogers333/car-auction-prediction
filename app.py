@@ -27,6 +27,9 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "car_auction_predict"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
+# Each row calls the OpenAI API; limit rows so the request doesn't time out (e.g. 25 × ~6s ≈ 2.5 min)
+MAX_ROWS_PER_UPLOAD = 25
+
 
 def require_openai_key() -> None:
     if not os.environ.get("OPENAI_API_KEY", "").strip():
@@ -59,7 +62,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <h1>Car Auction Price Prediction Pipeline</h1>
-    <p>Upload a file: Excel (.xlsx, .xls), CSV (.csv), TSV (.tsv), or JSON (.json, .jsonl). Columns: vehicle_id (or id), make, model, year, mileage, price (optional). Order doesn't matter.</p>
+    <p>Upload a file: Excel (.xlsx, .xls), CSV (.csv), TSV (.tsv), or JSON (.json, .jsonl). Columns: vehicle_id (or id), make, model, year, mileage, price (optional). Order doesn't matter. <strong>Max {{ max_rows }} rows per upload</strong> (each row calls the API; larger files will time out).</p>
     
     <div class="upload">
         <form method="post" enctype="multipart/form-data">
@@ -91,7 +94,7 @@ HTML_TEMPLATE = """
     {% endif %}
     
     {% if results %}
-    <div class="success">Processed {{ results|length }} vehicles</div>
+    <div class="success">Processed {{ results|length }} vehicles{{ row_limit_msg|default("", true) }}. {% if row_limit_msg %}Split large files into chunks of {{ max_rows }} rows or fewer.{% endif %}</div>
     <h2>Results</h2>
     <table>
         <thead>
@@ -138,13 +141,13 @@ HTML_TEMPLATE = """
 def index():
     if request.method == "POST":
         if "file" not in request.files:
-            return render_template_string(HTML_TEMPLATE, error="No file uploaded")
+            return render_template_string(HTML_TEMPLATE, error="No file uploaded", template_link="/create_template", max_rows=MAX_ROWS_PER_UPLOAD)
         file = request.files["file"]
         if file.filename == "":
-            return render_template_string(HTML_TEMPLATE, error="No file selected")
+            return render_template_string(HTML_TEMPLATE, error="No file selected", template_link="/create_template", max_rows=MAX_ROWS_PER_UPLOAD)
         allowed = (".xlsx", ".xls", ".csv", ".tsv", ".txt", ".json", ".jsonl")
         if not file.filename or not file.filename.lower().endswith(allowed):
-            return render_template_string(HTML_TEMPLATE, error=f"File must be one of: {', '.join(allowed)}")
+            return render_template_string(HTML_TEMPLATE, error=f"File must be one of: {', '.join(allowed)}", template_link="/create_template", max_rows=MAX_ROWS_PER_UPLOAD)
         condition = request.form.get("condition", "P1")
         if condition not in CONDITIONS:
             condition = "P1"
@@ -158,7 +161,12 @@ def index():
                 vehicles = load_from_file(tmp_path)
                 tmp_path.unlink()
             if not vehicles:
-                return render_template_string(HTML_TEMPLATE, error="No vehicles found in Excel file")
+                return render_template_string(HTML_TEMPLATE, error="No vehicles found in file.", template_link="/create_template", max_rows=MAX_ROWS_PER_UPLOAD)
+            total_rows = len(vehicles)
+            row_limit_msg = ""
+            if total_rows > MAX_ROWS_PER_UPLOAD:
+                vehicles = vehicles[:MAX_ROWS_PER_UPLOAD]
+                row_limit_msg = f" (first {len(vehicles)} of {total_rows} rows)"
             results = []
             for vehicle in vehicles:
                 payload = run_pipeline(vehicle, condition_id=condition, use_mock_llm=False, project_root=PROJECT_ROOT)
@@ -183,10 +191,25 @@ def index():
                 out_path = TEMP_DIR / out_name
                 out_df.to_excel(out_path, index=False, engine="openpyxl")
                 download_link = f"/download/{out_name}"
-            return render_template_string(HTML_TEMPLATE, results=results, download_link=download_link)
+            return render_template_string(
+                HTML_TEMPLATE,
+                results=results,
+                download_link=download_link,
+                template_link="/create_template",
+                max_rows=MAX_ROWS_PER_UPLOAD,
+                row_limit_msg=row_limit_msg,
+            )
         except Exception as e:
-            return render_template_string(HTML_TEMPLATE, error=f"Error processing file: {str(e)}")
-    return render_template_string(HTML_TEMPLATE, template_link="/create_template")
+            err_msg = str(e)
+            if "timeout" in err_msg.lower() or "timed out" in err_msg.lower():
+                err_msg = "Request timed out. Try a smaller file (max 25 rows recommended)."
+            return render_template_string(
+                HTML_TEMPLATE,
+                error=f"Error processing file: {err_msg}",
+                template_link="/create_template",
+                max_rows=MAX_ROWS_PER_UPLOAD,
+            )
+    return render_template_string(HTML_TEMPLATE, template_link="/create_template", max_rows=MAX_ROWS_PER_UPLOAD)
 
 
 @app.route("/download/<filename>")
