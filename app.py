@@ -10,6 +10,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from uuid import uuid4
+from io import BytesIO
 
 import pandas as pd
 from flask import Flask, render_template_string, request, send_file
@@ -22,6 +24,8 @@ app = Flask(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+TEMP_DIR = Path(os.environ.get("TMPDIR", "/tmp")) / "car_auction_predict"
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def require_openai_key() -> None:
@@ -167,25 +171,24 @@ def index():
             download_link = None
             if results:
                 out_df = pd.DataFrame(results)
-                out_path = DATA_DIR / f"results_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
+                out_name = f"results_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}.xlsx"
+                out_path = TEMP_DIR / out_name
                 out_df.to_excel(out_path, index=False, engine="openpyxl")
-                download_link = f"/download/{out_path.name}"
+                download_link = f"/download/{out_name}"
             return render_template_string(HTML_TEMPLATE, results=results, download_link=download_link)
         except Exception as e:
             return render_template_string(HTML_TEMPLATE, error=f"Error processing file: {str(e)}")
-    template_link = None
-    template_path = DATA_DIR / "template.xlsx"
-    if template_path.exists():
-        template_link = f"/download/{template_path.name}"
-    return render_template_string(HTML_TEMPLATE, template_link=template_link)
+    return render_template_string(HTML_TEMPLATE, template_link="/create_template")
 
 
 @app.route("/download/<filename>")
 def download(filename: str):
-    path = DATA_DIR / filename
-    if not path.exists():
-        return "File not found", 404
-    return send_file(str(path), as_attachment=True)
+    # Serve generated files from temp dir, and allow legacy data/ files.
+    for base in (TEMP_DIR, DATA_DIR):
+        path = base / filename
+        if path.exists():
+            return send_file(str(path), as_attachment=True)
+    return "File not found", 404
 
 
 @app.route("/create_template")
@@ -195,9 +198,16 @@ def create_template():
         {"vehicle_id": "v2", "make": "BMW", "model": "340i", "year": 2019, "mileage": 40000, "price": 32000},
         {"vehicle_id": "v3", "make": "BMW", "model": "328i", "year": 2018, "mileage": 55000, "price": 22000},
     ])
-    path = DATA_DIR / "template.xlsx"
-    df.to_excel(path, index=False, engine="openpyxl")
-    return send_file(str(path), as_attachment=True, download_name="vehicles_template.xlsx")
+    # Generate template in-memory (more reliable on PaaS filesystems)
+    buf = BytesIO()
+    df.to_excel(buf, index=False, engine="openpyxl")
+    buf.seek(0)
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name="vehicles_template.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 if __name__ == "__main__":
