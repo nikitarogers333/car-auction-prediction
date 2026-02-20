@@ -4,6 +4,16 @@ This document explains how to obtain, run, and evaluate the car auction price pr
 
 ---
 
+## Research focus
+
+The project is framed around a **research question**: How can we make LLM predictions **deterministic** (consistent) and **constraint-following**, and how do we **check quality** so we only accept valid outputs? Car auction price is the running example.
+
+- **RESEARCH_README.md** — Research questions, approach (structured output + validation gate + hook-style enforcement), and references (Claude Code Hooks, structured outputs, verifier pattern).
+- **Web app** — The Flask app (`app.py`) is structured around the **scientific process**: Observation → Question → Hypothesis → Experiment → Data Collection → Analysis → Conclusion → Repeat. Students can run **batch experiments** (upload file, P1–P4) or a **consistency check** (same vehicle, N repeats) to measure variance (CV, valid rate).
+- **docs/CLAUDE_HOOKS_AND_ENFORCEMENT.md** — Maps the project’s PrePredictionHook, PostPredictionHook, StopHook to Claude Code Hooks and the “deterministic under constraints” stack.
+
+---
+
 ## What the project is
 
 - A **research-style framework** for car auction price prediction using a strict pipeline: validation → feature extraction → subgroup classification → restrictions → prediction → post-validation → scoring/logging.
@@ -74,6 +84,13 @@ All of the following work **without** an OpenAI API key (mock predictor is deter
    Expected: KNN MAE and Linear Regression MAE printed, and `eval/baselines_summary.json` created.
 
 **Requirements:** Python 3.11+ and standard library only for mock mode. For real API: `pip install openai` and `OPENAI_API_KEY` set.
+
+6. **Web app (with API key):**
+   ```bash
+   pip install -r requirements.txt
+   python3 app.py
+   ```
+   Open http://localhost:5000. Use the **Experiment** section: upload a file, choose condition (P1–P4), optionally check **Consistency check** (first vehicle only, N repeats). Results appear under Data collection and Analysis (valid rate, mean/std/CV of predicted price). Use **Repeat / Refine** to run another experiment.
 
 ---
 

@@ -35,7 +35,7 @@ git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
 git push -u origin main
 ```
 
-**Important:** Your `.gitignore` ensures secrets and large files aren't committed. Never commit `OPENAI_API_KEY` or `.env` files.
+**Important:** Your `.gitignore` ensures secrets and large files aren't committed. Never commit `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `.env` files.
 
 ---
 
@@ -51,9 +51,9 @@ git push -u origin main
    - Choose your repository (`car-auction-prediction` or whatever you named it)
    - Railway will detect it's a Python app (sees `requirements.txt` and `Procfile`)
 
-3. **Set environment variable:**
+3. **Set environment variable(s):**
    - In Railway dashboard, go to your project → Variables
-   - Add: `OPENAI_API_KEY` = `your-actual-api-key-here`
+   - Add **OPENAI_API_KEY** (for OpenAI) and/or **ANTHROPIC_API_KEY** (for Claude). At least one is required; add both to compare providers in the web app.
    - Railway will restart the app automatically
 
 4. **Deploy:**

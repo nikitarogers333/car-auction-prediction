@@ -18,7 +18,14 @@ from agent import (
     RestrictionEnforcer,
     SubgroupClassifier,
 )
-from config import DEFAULT_MODEL, DEFAULT_SEED, DEFAULT_TEMPERATURE, DEFAULT_TOP_P
+from config import (
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_MODEL,
+    DEFAULT_SEED,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_P,
+    PROVIDERS,
+)
 from hooks import HookDecision, PostPredictionHook, PrePredictionHook, StopHook
 
 
@@ -30,21 +37,28 @@ def run_pipeline(
     pre_hook: PrePredictionHook | None = None,
     post_hook: PostPredictionHook | None = None,
     stop_hook: StopHook | None = None,
+    provider_id: str = "openai",
 ) -> dict[str, Any]:
     """
     Single run through the pipeline. Returns final payload (with valid, prediction, etc.).
+    provider_id: "openai" or "claude" to choose which API to call.
     """
     root = project_root or Path(__file__).resolve().parent
     pre_guard = PreValidationGuard(allow_vin_in_context=False)
     feat_agent = FeatureExtractionAgent()
     subgroup = SubgroupClassifier(root)
     enforcer = RestrictionEnforcer(root)
+    provider = (provider_id or "openai").lower()
+    if provider not in PROVIDERS:
+        provider = "openai"
+    model_name = DEFAULT_CLAUDE_MODEL if provider == "claude" else DEFAULT_MODEL
     pred_agent = PredictionAgent(
         use_mock=use_mock_llm,
         temperature=DEFAULT_TEMPERATURE,
         top_p=DEFAULT_TOP_P,
-        model_name=DEFAULT_MODEL,
+        model_name=model_name,
         seed=DEFAULT_SEED,
+        provider=provider,
     )
     post_guard = PostValidationGuard(root)
 
@@ -91,6 +105,10 @@ def run_consistency_check(
     condition_id: str = "P1",
     use_mock_llm: bool | None = None,
     project_root: Path | None = None,
+    pre_hook: PrePredictionHook | None = None,
+    post_hook: PostPredictionHook | None = None,
+    stop_hook: StopHook | None = None,
+    provider_id: str = "openai",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run prediction N times; return (list of payloads, variance_stats)."""
     import os
@@ -100,7 +118,16 @@ def run_consistency_check(
     for i in range(n_repeats):
         # Force mock if no key so repeats are deterministic
         use_mock = use_mock_llm if use_mock_llm is not None else not bool(os.environ.get("OPENAI_API_KEY"))
-        payload = run_pipeline(raw_input, condition_id=condition_id, use_mock_llm=use_mock, project_root=project_root)
+        payload = run_pipeline(
+            raw_input,
+            condition_id=condition_id,
+            use_mock_llm=use_mock,
+            project_root=project_root,
+            pre_hook=pre_hook,
+            post_hook=post_hook,
+            stop_hook=stop_hook,
+            provider_id=provider_id,
+        )
         results.append(payload)
         pred = payload.get("prediction") or {}
         p = pred.get("predicted_price")

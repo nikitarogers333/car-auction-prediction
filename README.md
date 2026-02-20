@@ -2,6 +2,8 @@
 
 A **controlled research framework** for numeric car auction price prediction: consistent predictions, strict behavioral restrictions, no unauthorized lookups, variance measurement, full audit trail, deterministic routing, and comparison to statistical baselines.
 
+**Research angle:** This project explores how to make LLMs **deterministic** and **constraint-following** (car price is the example). The web app is structured around the **scientific process** (Observation → Question → Hypothesis → Experiment → Data Collection → Analysis → Conclusion → Repeat). See **[RESEARCH_README.md](RESEARCH_README.md)** for the research questions and how we use structured outputs, validation gates, and **hook-style enforcement** (aligned with [Claude Code Hooks](https://code.claude.com/docs/en/hooks-guide)). Mapping to Claude hooks and the “deterministic under constraints” stack: **[docs/CLAUDE_HOOKS_AND_ENFORCEMENT.md](docs/CLAUDE_HOOKS_AND_ENFORCEMENT.md)**.
+
 ## What This System Does
 
 - **Produces** price predictions in a strict JSON format (schema-validated).
@@ -40,20 +42,22 @@ Procfile       Railway deployment config
 
 - **How to use it yourself:** see **HOW_TO_RUN.md** (copy-paste commands, no API key needed).
 - **How to share with your professor:** zip the project or use Git; give them **PROFESSOR.md** for run instructions and grading notes.
+- **Regression testing:** run `python3 scripts/run_eval.py` (mock) to validate pipeline output on a fixed dataset.
 
 ## How to Run
 
 ### Prerequisites
 
 - Python 3.11+
-- **OPENAI_API_KEY** (required)
+- **OPENAI_API_KEY** and/or **ANTHROPIC_API_KEY** (at least one required for real predictions; use both to compare providers)
 - Install dependencies: `pip install -r requirements.txt`
 
 ### Web App (Recommended for Professors)
 
-1. **Set your OpenAI API key:**
+1. **Set at least one API key** (use both to compare OpenAI vs Claude):
    ```bash
-   export OPENAI_API_KEY="sk-..."
+   export OPENAI_API_KEY="sk-..."    # for OpenAI (GPT)
+   export ANTHROPIC_API_KEY="sk-ant-..."   # for Claude
    ```
 
 2. **Run the Flask app:**
@@ -63,8 +67,9 @@ Procfile       Railway deployment config
    Opens at `http://localhost:5000`
 
 3. **Upload Excel file** (columns: vehicle_id, make, model, year, mileage, price optional)
+   - Choose **Provider**: OpenAI (GPT) or Claude (Anthropic) to compare both
    - Download template: visit `/create_template` or use `data/template.xlsx`
-   - Upload via web form
+   - Optionally enable **Consistency check** (same vehicle, N repeats) or **Use enforcement hooks** (reject if confidence &lt; 0.3)
    - View results table and download results as Excel
 
 ### CLI (Command Line)

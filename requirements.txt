@@ -1,5 +1,6 @@
 # Car auction price prediction pipeline + web app
 openai>=1.0.0
+anthropic>=0.39.0
 pandas>=2.0.0
 openpyxl>=3.1.0
 numpy>=1.24.0

@@ -1,7 +1,6 @@
 """
 PredictionAgent: produces strict JSON prediction.
-Supports: mock LLM, real OpenAI (when key present), and fallback to baseline (nearest_neighbors/regression).
-Determinism: temperature=0, top_p=1, fixed system prompt, seed when supported.
+Supports: mock LLM, OpenAI, Claude. Determinism: temperature=0, top_p=1, fixed system prompt, seed when supported.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ Respond with exactly one JSON object."""
 
 
 class PredictionAgent:
-    """Outputs strict JSON matching PredictionOutput schema."""
+    """Outputs strict JSON matching PredictionOutput schema. Supports provider='openai' or 'claude'."""
 
     def __init__(
         self,
@@ -39,21 +38,27 @@ class PredictionAgent:
         top_p: float = 1.0,
         model_name: str = "gpt-4o-mini",
         seed: int | None = 42,
+        provider: str = "openai",
     ) -> None:
         self.temperature = temperature
         self.top_p = top_p
         self.model_name = model_name
         self.seed = seed
+        self._provider = (provider or "openai").lower()
         if use_mock is not None:
             self._use_mock = use_mock
         else:
-            self._use_mock = not bool(os.environ.get("OPENAI_API_KEY"))
+            has_openai = bool(os.environ.get("OPENAI_API_KEY", "").strip())
+            has_claude = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
+            self._use_mock = not (has_openai or has_claude)
 
     def run(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Produce prediction and set payload['prediction']."""
         out = dict(payload)
         if self._use_mock:
             pred = self._mock_predict(out)
+        elif self._provider == "claude":
+            pred = self._llm_predict_claude(out)
         else:
             pred = self._llm_predict(out)
         out["prediction"] = pred
@@ -122,6 +127,61 @@ class PredictionAgent:
                 "notes": f"LLM error: {str(e)[:180]}",
             }
 
+        return self._parse_llm_response(text, payload)
+
+    def _llm_predict_claude(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Call Anthropic Claude with system + user message; parse JSON from response."""
+        try:
+            from anthropic import Anthropic
+        except ImportError:
+            return self._mock_predict(payload)
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            return self._mock_predict(payload)
+
+        client = Anthropic(api_key=api_key)
+        user_prompt = USER_PROMPT_TEMPLATE.format(
+            make=payload.get("make", ""),
+            model=payload.get("model", ""),
+            year=payload.get("year", 0),
+            mileage=payload.get("mileage") or "N/A",
+            subgroup=payload.get("subgroup", "generic"),
+            allowed_comparables=payload.get("allowed_comparables", []),
+        )
+        try:
+            resp = client.messages.create(
+                model=self.model_name,
+                max_tokens=512,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_prompt}],
+                temperature=self.temperature,
+            )
+            text = ""
+            for block in (resp.content or []):
+                if getattr(block, "type", None) == "text" and hasattr(block, "text"):
+                    text += block.text
+            text = text.strip()
+        except Exception as e:
+            return {
+                "predicted_price": 0,
+                "confidence": 0,
+                "method": "llm_internal",
+                "subgroup_detected": payload.get("subgroup", "generic"),
+                "notes": f"Claude error: {str(e)[:180]}",
+            }
+        if not text:
+            return {
+                "predicted_price": 0,
+                "confidence": 0,
+                "method": "llm_internal",
+                "subgroup_detected": payload.get("subgroup", "generic"),
+                "notes": "Claude returned empty response",
+            }
+        return self._parse_llm_response(text, payload)
+
+    def _parse_llm_response(self, text: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Parse JSON from LLM text and return normalized prediction dict."""
         parsed = self._extract_json(text)
         if parsed is None:
             return {
@@ -131,7 +191,6 @@ class PredictionAgent:
                 "subgroup_detected": payload.get("subgroup", "generic"),
                 "notes": f"Invalid JSON: {text[:180]}",
             }
-        # Ensure required keys and types
         return {
             "predicted_price": float(parsed.get("predicted_price", 0)),
             "confidence": float(parsed.get("confidence", 0)),

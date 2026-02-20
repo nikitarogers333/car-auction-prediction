@@ -58,6 +58,13 @@ python3 main.py --mock --repeats 2 --limit 4 experiments
 python3 main.py baselines
 ```
 
+**Regression / eval harness (mock):** Run a fixed set of vehicles through the pipeline and check schema + valid + bounds. Useful for CI or after code changes.
+
+```bash
+python3 scripts/run_eval.py
+python3 scripts/run_eval.py --data data/vehicles.json
+```
+
 Important: put **global options** (`--mock`, `--repeats`, `--log`, `--index`, etc.) **before** the command word (`single`, `consistency`, `experiments`, `baselines`).
 
 ---
@@ -98,6 +105,7 @@ Important: put **global options** (`--mock`, `--repeats`, `--log`, `--index`, et
 | Variance over 5 runs    | `python3 main.py --mock --repeats 5 consistency`     |
 | P1–P4 comparison        | `python3 main.py --mock --repeats 2 --limit 4 experiments` |
 | Baselines               | `python3 main.py baselines`                          |
+| Eval harness (mock)     | `python3 scripts/run_eval.py`                        |
 | Use 2nd vehicle in file | `python3 main.py --mock --index 1 single`            |
 
 For more detail, see **README.md**.

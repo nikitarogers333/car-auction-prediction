@@ -54,5 +54,23 @@ class StopHook:
         return self.fn(context)
 
 
+def make_confidence_floor_hook(floor: float = 0.3) -> PostPredictionHook:
+    """PostPredictionHook that DENYs when prediction confidence is below floor. Use for research: compare valid rate with vs without hooks."""
+
+    def _fn(ctx: dict[str, Any]) -> tuple[HookDecision, dict[str, Any] | None]:
+        pred = ctx.get("prediction") or {}
+        conf = pred.get("confidence")
+        if conf is None:
+            return HookDecision.DENY, None
+        try:
+            if float(conf) < floor:
+                return HookDecision.DENY, None
+        except (TypeError, ValueError):
+            return HookDecision.DENY, None
+        return HookDecision.ALLOW, None
+
+    return PostPredictionHook(_fn)
+
+
 # Re-export for use in pipeline
 HookDecision = HookDecision

@@ -32,6 +32,10 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_TOP_P = 1.0
 DEFAULT_SEED = 42
 DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_CLAUDE_MODEL = "claude-3-5-haiku-20241022"
+
+# Providers (for UI: OpenAI vs Claude)
+PROVIDERS = ("openai", "claude")
 
 # Consistency testing
 DEFAULT_N_REPEATS = 5
