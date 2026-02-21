@@ -100,6 +100,11 @@ git push -u origin main
 - Make sure you're authenticated: `gh auth login` or use SSH keys
 - Check `.gitignore` isn't blocking important files
 
+**"Failed to fetch" or WORKER TIMEOUT when uploading training CSV:**
+- `railway.toml` and `Procfile` set Gunicorn `--timeout 300` for large/slow uploads
+- If it persists: Railway → your service → Settings → check **Custom Start Command**. If one is set, it can override `railway.toml`. Either remove it (so config-from-code is used) or ensure it includes `--timeout 300`
+- Verify: open deployment details; settings from `railway.toml` show a file icon on hover
+
 ---
 
 ## For Your Professor
