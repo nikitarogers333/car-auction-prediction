@@ -1,3 +1,3 @@
-# Config-as-code: overrides dashboard settings. Ensures 120s worker timeout for file uploads.
+# Config-as-code: overrides dashboard settings. 300s timeout for slow uploads.
 [deploy]
-startCommand = "gunicorn app:app --timeout 120 --workers 2 --bind 0.0.0.0:$PORT"
+startCommand = "gunicorn app:app --timeout 300 --workers 2 --bind 0.0.0.0:$PORT"
