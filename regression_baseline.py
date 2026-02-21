@@ -39,9 +39,10 @@ COLUMN_ALIASES: dict[str, list[str]] = {
     "model": ["model", "Model", "car_model"],
     "transmission": ["transmission", "Transmission", "gearbox"],
     "fuel_type": ["fuel_type", "Fuel_Type", "fuel", "Fuel"],
-    "body": ["body", "Body", "body_type", "body_style"],
+    "body": ["body", "Body", "body_type", "body_style", "type"],
     "color": ["color", "Color"],
     "interior": ["interior", "Interior"],
+    "drive": ["drive", "drivetrain", "Drive"],
 }
 
 RF_PATH = DATA_DIR / "random_forest_model.pkl"
@@ -122,7 +123,7 @@ def load_and_clean(
 
     # Get list of feature columns (everything except target)
     numeric_internal = ["year", "odometer", "condition", "mmr"]
-    categorical_internal = ["make", "model", "body", "transmission", "color", "interior", "fuel_type"]
+    categorical_internal = ["make", "model", "body", "transmission", "color", "interior", "fuel_type", "drive"]
 
     for col in numeric_internal:
         if col in df.columns:
@@ -178,7 +179,7 @@ def train_and_save(path: Path | None = None) -> None:
 
     # Build feature lists
     numeric_internal = ["year", "odometer", "condition", "mmr"]
-    categorical_internal = ["make", "model", "body", "transmission", "color", "interior", "fuel_type"]
+    categorical_internal = ["make", "model", "body", "transmission", "color", "interior", "fuel_type", "drive"]
 
     detected_numeric = [c for c in numeric_internal if c in column_mapping]
     detected_categorical = [c for c in categorical_internal if c in column_mapping]
