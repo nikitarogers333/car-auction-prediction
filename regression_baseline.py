@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import pickle
 from pathlib import Path
 
@@ -32,6 +33,7 @@ RF_PATH = DATA_DIR / "random_forest_model.pkl"
 XGB_PATH = DATA_DIR / "xgboost_model.pkl"
 ENCODERS_PATH = DATA_DIR / "label_encoders.pkl"
 MEDIANS_PATH = DATA_DIR / "training_medians.pkl"
+METRICS_JSON_PATH = DATA_DIR / "training_metrics.json"
 
 
 TRAIN_SAMPLE_SIZE = 5000
@@ -117,6 +119,14 @@ def train_and_save() -> None:
         pickle.dump(encoders, f)
     with open(MEDIANS_PATH, "wb") as f:
         pickle.dump(medians, f)
+
+    rf_mae = float(-rf_mae_scores.mean())
+    rf_r2 = float(rf_r2_scores.mean())
+    xgb_mae = float(-xgb_mae_scores.mean())
+    xgb_r2 = float(xgb_r2_scores.mean())
+    metrics = {"rf_mae": rf_mae, "rf_r2": rf_r2, "xgb_mae": xgb_mae, "xgb_r2": xgb_r2}
+    with open(METRICS_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(metrics, f)
 
     print(f"\nSaved:")
     print(f"  {RF_PATH}")

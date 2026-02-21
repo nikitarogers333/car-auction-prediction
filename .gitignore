@@ -21,6 +21,7 @@ data/*.xls
 data/*.pkl
 data/car_prices.csv
 data/comparison_results.json
+data/training_metrics.json
 eval/*.json
 logs/*.jsonl
 
