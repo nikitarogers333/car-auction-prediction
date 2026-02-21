@@ -34,13 +34,15 @@ ENCODERS_PATH = DATA_DIR / "label_encoders.pkl"
 MEDIANS_PATH = DATA_DIR / "training_medians.pkl"
 
 
-def load_and_clean(path: Path = KAGGLE_CSV, sample_n: int | None = None) -> pd.DataFrame:
+TRAIN_SAMPLE_SIZE = 5000
+
+
+def load_and_clean(path: Path = KAGGLE_CSV) -> pd.DataFrame:
     df = pd.read_csv(path)
     df.columns = df.columns.str.strip().str.lower()
     df = df.dropna(subset=[TARGET])
     df = df[df[TARGET] > 0].copy()
-    if sample_n and len(df) > sample_n:
-        df = df.sample(n=sample_n, random_state=42).reset_index(drop=True)
+    df = df.sample(n=TRAIN_SAMPLE_SIZE, random_state=42).reset_index(drop=True)
     for col in DROP_COLUMNS:
         if col in df.columns:
             df = df.drop(columns=[col])
@@ -73,13 +75,10 @@ def encode_and_split(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, dict[str
     return X, y, encoders, medians
 
 
-def train_and_save(sample_n: int | None = 50000) -> None:
+def train_and_save() -> None:
     print(f"Loading {KAGGLE_CSV}...")
-    df = load_and_clean(sample_n=sample_n)
-    if sample_n:
-        print(f"  {len(df)} rows after cleaning + sampling {sample_n} (full dataset is larger)")
-    else:
-        print(f"  {len(df)} rows after cleaning (dropped null/zero sellingprice)")
+    df = load_and_clean()
+    print(f"  {len(df)} rows after cleaning + sampling {TRAIN_SAMPLE_SIZE}")
 
     X, y, encoders, medians = encode_and_split(df)
     feature_cols = [c for c in NUMERIC_FEATURES + CATEGORICAL_FEATURES if c in df.columns]
@@ -128,9 +127,4 @@ def train_and_save(sample_n: int | None = 50000) -> None:
 
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--sample", type=int, default=50000,
-                        help="Sample N rows for training (0 = use all rows, default 50000)")
-    args = parser.parse_args()
-    train_and_save(sample_n=args.sample if args.sample > 0 else None)
+    train_and_save()
