@@ -507,14 +507,14 @@ COMPARE_TEMPLATE = """
         <div class="step-title">Step 1: Train Regression Models (one-time setup)</div>
         <div id="training-current-status">
             {% if regression_available %}
-            <div class="success">Regression models trained and ready. <span style="font-size:0.85rem;">({{ training_timestamp }})</span></div>
+            <div class="success">Regression models trained and ready. <span style="font-size:0.85rem;">({{ training_timestamp }})</span>{% if training_features %} Features used: {{ training_features }}{% endif %}</div>
             {% else %}
-            <div class="warning">Regression models not trained yet. Upload <code>car_prices.csv</code> below to train them.</div>
+            <div class="warning">Regression models not trained yet. Upload a car dataset (CSV or Excel) below to train them.</div>
             {% endif %}
         </div>
         <form id="train-form" style="margin-top: 10px;">
-            <label>Upload <code>car_prices.csv</code> training dataset:
-                <input type="file" name="training_file" id="training-file" accept=".csv" style="margin-left: 8px;">
+            <label>Upload car dataset (CSV, .xlsx, or .xls):
+                <input type="file" name="training_file" id="training-file" accept=".csv,.xlsx,.xls" style="margin-left: 8px;">
             </label>
             <br><br>
             <button type="submit" class="btn btn-train" id="train-btn">Upload &amp; Train</button>
@@ -568,7 +568,7 @@ COMPARE_TEMPLATE = """
     document.getElementById('train-form').addEventListener('submit', async function(e) {
         e.preventDefault();
         const fileInput = document.getElementById('training-file');
-        if (!fileInput.files.length) { alert('Select a CSV file first.'); return; }
+        if (!fileInput.files.length) { alert('Select a CSV or Excel file first.'); return; }
         const statusDiv = document.getElementById('train-status');
         const btn = document.getElementById('train-btn');
         btn.disabled = true;
@@ -675,20 +675,23 @@ COMPARE_TEMPLATE = """
 
 @app.route("/upload-training-data", methods=["POST"])
 def upload_training_data():
-    """Save uploaded CSV and train regression models."""
+    """Save uploaded CSV/Excel and train regression models."""
     if "training_file" not in request.files:
         return jsonify({"success": False, "error": "No file uploaded"})
     f = request.files["training_file"]
-    if not f.filename or not f.filename.lower().endswith(".csv"):
-        return jsonify({"success": False, "error": "File must be a .csv"})
-    dest = DATA_DIR / "car_prices.csv"
+    if not f.filename:
+        return jsonify({"success": False, "error": "No file selected"})
+    suffix = Path(f.filename).suffix.lower()
+    if suffix not in (".csv", ".xlsx", ".xls"):
+        return jsonify({"success": False, "error": "File must be .csv, .xlsx, or .xls"})
+    dest = DATA_DIR / ("car_prices" + suffix)
     try:
         f.save(str(dest))
     except Exception as e:
         return jsonify({"success": False, "error": f"Failed to save file: {e}"})
     try:
         result = subprocess.run(
-            ["python3", str(PROJECT_ROOT / "regression_baseline.py")],
+            ["python3", str(PROJECT_ROOT / "regression_baseline.py"), str(dest)],
             capture_output=True, text=True, timeout=600,
             cwd=str(PROJECT_ROOT),
         )
@@ -696,9 +699,12 @@ def upload_training_data():
             return jsonify({"success": False, "error": result.stderr or result.stdout or "Training script failed"})
         metrics_path = DATA_DIR / "training_metrics.json"
         if metrics_path.exists():
-            with open(metrics_path, encoding="utf-8") as f:
-                m = json.load(f)
+            with open(metrics_path, encoding="utf-8") as mf:
+                m = json.load(mf)
             msg = f"RF MAE: ${m.get('rf_mae', 0):,.0f}, R²={m.get('rf_r2', 0):.4f} | XGB MAE: ${m.get('xgb_mae', 0):,.0f}, R²={m.get('xgb_r2', 0):.4f}"
+            features = m.get("features_used", [])
+            if features:
+                msg += f". Features used: {', '.join(features)}"
         else:
             msg = "Models trained."
         return jsonify({"success": True, "message": msg})
@@ -875,14 +881,23 @@ def run_comparison_api():
 def compare_view():
     reg_avail = regression_models_available()
     training_ts = ""
+    training_features = ""
     if reg_avail:
         pkl = DATA_DIR / "random_forest_model.pkl"
         if pkl.exists():
             training_ts = datetime.fromtimestamp(pkl.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        metrics_path = DATA_DIR / "training_metrics.json"
+        if metrics_path.exists():
+            with open(metrics_path, encoding="utf-8") as mf:
+                m = json.load(mf)
+            features = m.get("features_used", [])
+            if features:
+                training_features = ", ".join(features)
     ctx = {
         "temperature": COMPARISON_TEMPERATURE,
         "regression_available": reg_avail,
         "training_timestamp": training_ts,
+        "training_features": training_features,
         "provider_selected": "openai",
         "n_vehicles_selected": 10,
         "n_repeats_selected": 5,

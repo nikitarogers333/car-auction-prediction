@@ -20,7 +20,7 @@ ENCODERS_PATH = DATA_DIR / "label_encoders.pkl"
 MEDIANS_PATH = DATA_DIR / "training_medians.pkl"
 
 NUMERIC_FEATURES = ["year", "odometer", "condition", "mmr"]
-CATEGORICAL_FEATURES = ["make", "model", "body", "transmission", "color", "interior"]
+CATEGORICAL_FEATURES = ["make", "model", "body", "transmission", "color", "interior", "fuel_type"]
 
 _rf_bundle: dict[str, Any] | None = None
 _xgb_bundle: dict[str, Any] | None = None
@@ -73,27 +73,28 @@ def _encode_value(col: str, value: str) -> float:
 
 
 def _build_feature_vector(
-    year: float, odometer: float, condition: float, mmr: float,
-    make: str, model: str, body: str, transmission: str,
-    color: str, interior: str,
+    year: float = 0, odometer: float = 0, condition: float = 0, mmr: float = 0,
+    make: str = "", model: str = "", body: str = "", transmission: str = "",
+    color: str = "", interior: str = "", fuel_type: str = "",
+    **kwargs: object,
 ) -> np.ndarray:
-    """Build feature vector matching training column order."""
+    """Build feature vector matching training column order. Uses medians for missing optional features."""
     _load()
     assert _medians is not None
     feature_cols = _rf_bundle["feature_cols"] if _rf_bundle else NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
+    numeric_defaults: dict[str, float] = {
+        "year": 2018, "odometer": 50000, "condition": 3.0, "mmr": 15000,
+    }
     values: dict[str, float] = {}
-    values["year"] = float(year) if year else _medians.get("year", 2018)
-    values["odometer"] = float(odometer) if odometer else _medians.get("odometer", 50000)
-    values["condition"] = float(condition) if condition else _medians.get("condition", 3.0)
-    values["mmr"] = float(mmr) if mmr else _medians.get("mmr", 15000)
+    values["year"] = float(year) if year else _medians.get("year", numeric_defaults["year"])
+    values["odometer"] = float(odometer) if odometer else _medians.get("odometer", numeric_defaults["odometer"])
+    values["condition"] = float(condition) if condition else _medians.get("condition", numeric_defaults["condition"])
+    values["mmr"] = float(mmr) if mmr else _medians.get("mmr", numeric_defaults["mmr"])
 
-    values["make"] = _encode_value("make", make)
-    values["model"] = _encode_value("model", model)
-    values["body"] = _encode_value("body", body)
-    values["transmission"] = _encode_value("transmission", transmission)
-    values["color"] = _encode_value("color", color)
-    values["interior"] = _encode_value("interior", interior)
+    for col in ["make", "model", "body", "transmission", "color", "interior", "fuel_type"]:
+        val = locals().get(col, "") or kwargs.get(col, "")
+        values[col] = _encode_value(col, str(val) if val else "")
 
     vec = [values.get(c, _medians.get(c, 0.0)) for c in feature_cols]
     return np.array([vec], dtype=float)
@@ -102,22 +103,24 @@ def _build_feature_vector(
 def predict_rf(
     year: float = 0, odometer: float = 0, condition: float = 0, mmr: float = 0,
     make: str = "", model: str = "", body: str = "", transmission: str = "",
-    color: str = "", interior: str = "",
+    color: str = "", interior: str = "", fuel_type: str = "",
+    **kwargs: object,
 ) -> float:
     """Predict price using Random Forest. Returns float."""
     _load()
     assert _rf_bundle is not None
-    X = _build_feature_vector(year, odometer, condition, mmr, make, model, body, transmission, color, interior)
+    X = _build_feature_vector(year, odometer, condition, mmr, make, model, body, transmission, color, interior, fuel_type, **kwargs)
     return float(_rf_bundle["model"].predict(X)[0])
 
 
 def predict_xgb(
     year: float = 0, odometer: float = 0, condition: float = 0, mmr: float = 0,
     make: str = "", model: str = "", body: str = "", transmission: str = "",
-    color: str = "", interior: str = "",
+    color: str = "", interior: str = "", fuel_type: str = "",
+    **kwargs: object,
 ) -> float:
     """Predict price using XGBoost. Returns float."""
     _load()
     assert _xgb_bundle is not None
-    X = _build_feature_vector(year, odometer, condition, mmr, make, model, body, transmission, color, interior)
+    X = _build_feature_vector(year, odometer, condition, mmr, make, model, body, transmission, color, interior, fuel_type, **kwargs)
     return float(_xgb_bundle["model"].predict(X)[0])
