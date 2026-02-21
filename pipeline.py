@@ -19,14 +19,19 @@ from agent import (
     SubgroupClassifier,
 )
 from config import (
+    COMPARISON_TEMPERATURE,
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_MODEL,
     DEFAULT_SEED,
     DEFAULT_TEMPERATURE,
     DEFAULT_TOP_P,
+    ENFORCEMENT_LEVELS,
+    MAX_VALIDATION_RETRIES,
     PROVIDERS,
 )
 from hooks import HookDecision, PostPredictionHook, PrePredictionHook, StopHook
+from pricing import compute_price_from_features
+from schemas import validate_feature_output, validate_prediction_output
 
 
 def run_pipeline(
@@ -38,12 +43,19 @@ def run_pipeline(
     post_hook: PostPredictionHook | None = None,
     stop_hook: StopHook | None = None,
     provider_id: str = "openai",
+    enforcement_level: str = "E2",
+    temperature_override: float | None = None,
 ) -> dict[str, Any]:
     """
-    Single run through the pipeline. Returns final payload (with valid, prediction, etc.).
-    provider_id: "openai" or "claude" to choose which API to call.
+    Single run through the pipeline. Returns final payload.
+    enforcement_level E5: LLM extracts features, code computes price.
+    temperature_override: if set, overrides config temperature (used by compare.py).
     """
     root = project_root or Path(__file__).resolve().parent
+    level = (enforcement_level or "E2").upper()
+    if level not in ENFORCEMENT_LEVELS:
+        level = "E2"
+
     pre_guard = PreValidationGuard(allow_vin_in_context=False)
     feat_agent = FeatureExtractionAgent()
     subgroup = SubgroupClassifier(root)
@@ -52,12 +64,13 @@ def run_pipeline(
     if provider not in PROVIDERS:
         provider = "openai"
     model_name = DEFAULT_CLAUDE_MODEL if provider == "claude" else DEFAULT_MODEL
+    temp = temperature_override if temperature_override is not None else DEFAULT_TEMPERATURE
     pred_agent = PredictionAgent(
         use_mock=use_mock_llm,
-        temperature=DEFAULT_TEMPERATURE,
+        temperature=temp,
         top_p=DEFAULT_TOP_P,
         model_name=model_name,
-        seed=DEFAULT_SEED,
+        seed=DEFAULT_SEED if temp == 0.0 else None,
         provider=provider,
     )
     post_guard = PostValidationGuard(root)
@@ -78,25 +91,141 @@ def run_pipeline(
         if decision == HookDecision.MODIFY and modified is not None:
             payload = modified
 
-    payload = pred_agent.run(payload)
+    # --- E5 path: feature extraction + deterministic pricing ---
+    if level == "E5":
+        return _run_e5(payload, pred_agent, stop_hook)
 
-    if post_hook:
-        decision, modified = post_hook.run(payload)
-        if decision == HookDecision.DENY:
-            payload["valid"] = False
-            payload["violation_reason"] = "PostPredictionHook denied"
+    # --- E0-E4 path: LLM predicts price directly ---
+    retry_count = 0
+    max_retries = MAX_VALIDATION_RETRIES if level in ("E3", "E4") else 0
+
+    while True:
+        payload.pop("_validation_error_from_previous_attempt", None)
+        payload = pred_agent.run(payload)
+
+        if post_hook:
+            decision, modified = post_hook.run(payload)
+            if decision == HookDecision.DENY:
+                payload["valid"] = False
+                payload["violation_reason"] = "PostPredictionHook denied"
+                payload["retry_count"] = retry_count
+                return payload
+            if decision == HookDecision.MODIFY and modified is not None:
+                payload = modified
+
+        if level == "E0":
+            pred = payload.get("prediction") or {}
+            payload["valid"] = (
+                isinstance(pred.get("predicted_price"), (int, float))
+                and float(pred.get("predicted_price", 0)) >= 0
+            )
+            payload["violation_reason"] = None if payload["valid"] else "E0: no enforcement (parseable check only)"
+            payload["retry_count"] = retry_count
+            if stop_hook:
+                decision, _ = stop_hook.run(payload)
+                if decision == HookDecision.DENY:
+                    payload["valid"] = False
+                    payload["violation_reason"] = payload.get("violation_reason") or "StopHook denied"
             return payload
-        if decision == HookDecision.MODIFY and modified is not None:
-            payload = modified
 
-    payload = post_guard.run(payload)
+        if level == "E1":
+            pred = payload.get("prediction")
+            if not pred:
+                payload["valid"] = False
+                payload["violation_reason"] = "missing prediction"
+            else:
+                valid, msg = validate_prediction_output(pred)
+                payload["valid"] = valid
+                payload["violation_reason"] = None if valid else msg
+            payload["retry_count"] = retry_count
+            if stop_hook:
+                decision, _ = stop_hook.run(payload)
+                if decision == HookDecision.DENY:
+                    payload["valid"] = False
+                    payload["violation_reason"] = payload.get("violation_reason") or "StopHook denied"
+            return payload
 
-    if stop_hook:
-        decision, _ = stop_hook.run(payload)
-        if decision == HookDecision.DENY:
-            payload["valid"] = False
-            payload["violation_reason"] = payload.get("violation_reason") or "StopHook denied"
+        payload = post_guard.run(payload)
+
+        if payload.get("valid", False):
+            payload["retry_count"] = retry_count
+            if stop_hook:
+                decision, _ = stop_hook.run(payload)
+                if decision == HookDecision.DENY:
+                    payload["valid"] = False
+                    payload["violation_reason"] = payload.get("violation_reason") or "StopHook denied"
+            return payload
+
+        if retry_count >= max_retries:
+            payload["retry_count"] = retry_count
+            if stop_hook:
+                decision, _ = stop_hook.run(payload)
+                if decision == HookDecision.DENY:
+                    payload["violation_reason"] = payload.get("violation_reason") or "StopHook denied"
+            return payload
+
+        retry_count += 1
+        payload["_validation_error_from_previous_attempt"] = payload.get("violation_reason") or "validation failed"
+
     return payload
+
+
+def _run_e5(
+    payload: dict[str, Any],
+    pred_agent: PredictionAgent,
+    stop_hook: StopHook | None,
+) -> dict[str, Any]:
+    """E5: LLM extracts features -> validate -> deterministic pricing."""
+    retry_count = 0
+    max_retries = MAX_VALIDATION_RETRIES
+
+    while True:
+        payload.pop("_validation_error_from_previous_attempt", None)
+        payload = pred_agent.run_feature_extraction(payload)
+        features = payload.get("extracted_features") or {}
+
+        feat_err = features.pop("_validation_error", None)
+        if feat_err is None:
+            valid, feat_err = validate_feature_output(features)
+        else:
+            valid = False
+
+        if valid:
+            year = int(payload.get("year") or 2020)
+            mileage = int(payload.get("mileage") or 50000)
+            price = compute_price_from_features(features, year, mileage)
+            payload["prediction"] = {
+                "predicted_price": price,
+                "confidence": 0.90,
+                "method": "feature_extraction",
+                "subgroup_detected": payload.get("subgroup", "generic"),
+                "notes": f"E5 deterministic from features",
+            }
+            payload["valid"] = True
+            payload["violation_reason"] = None
+            payload["retry_count"] = retry_count
+            if stop_hook:
+                decision, _ = stop_hook.run(payload)
+                if decision == HookDecision.DENY:
+                    payload["valid"] = False
+                    payload["violation_reason"] = "StopHook denied"
+            return payload
+
+        if retry_count >= max_retries:
+            payload["prediction"] = {
+                "predicted_price": 0,
+                "confidence": 0,
+                "method": "feature_extraction",
+                "subgroup_detected": payload.get("subgroup", "generic"),
+                "notes": f"E5 feature validation failed after {retry_count} retries: {str(feat_err)[:120]}",
+            }
+            payload["valid"] = False
+            payload["violation_reason"] = f"E5 feature validation: {feat_err}"
+            payload["retry_count"] = retry_count
+            return payload
+
+        retry_count += 1
+        payload["_validation_error_from_previous_attempt"] = feat_err or "feature validation failed"
 
 
 def run_consistency_check(
@@ -109,6 +238,7 @@ def run_consistency_check(
     post_hook: PostPredictionHook | None = None,
     stop_hook: StopHook | None = None,
     provider_id: str = "openai",
+    enforcement_level: str = "E2",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run prediction N times; return (list of payloads, variance_stats)."""
     import os
@@ -127,6 +257,7 @@ def run_consistency_check(
             post_hook=post_hook,
             stop_hook=stop_hook,
             provider_id=provider_id,
+            enforcement_level=enforcement_level,
         )
         results.append(payload)
         pred = payload.get("prediction") or {}

@@ -27,15 +27,33 @@ CONDITIONS = {
     "P4": ExperimentCondition("P4", allow_external=False, allowlist_only=False, description="No web access enforced"),
 }
 
-# Determinism
+# Determinism (for single-run predictions)
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_TOP_P = 1.0
 DEFAULT_SEED = 42
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_CLAUDE_MODEL = "claude-3-5-haiku-20241022"
 
+# Comparison experiments: temperature > 0 so variance is real.
+# If temperature=0, perfect consistency is trivial and the argument collapses.
+COMPARISON_TEMPERATURE = 0.7
+
 # Providers (for UI: OpenAI vs Claude)
 PROVIDERS = ("openai", "claude")
+
+# Enforcement ladder: how much we enforce before accepting an output
+# E0 = no enforcement (accept if parseable), E1 = schema only, E2 = schema + validation gate,
+# E3 = E2 + retry/repair loop, E4 = E3 + verifier, E5 = deterministic pricing from LLM features
+ENFORCEMENT_LEVELS = ("E0", "E1", "E2", "E3", "E4", "E5")
+ENFORCEMENT_DESCRIPTIONS = {
+    "E0": "No enforcement (accept if parseable)",
+    "E1": "Schema only",
+    "E2": "Schema + validation gate",
+    "E3": "Schema + validation + retry/repair",
+    "E4": "E3 + verifier model",
+    "E5": "LLM extracts features, code computes price",
+}
+MAX_VALIDATION_RETRIES = 3  # for E3, E4
 
 # Consistency testing
 DEFAULT_N_REPEATS = 5

@@ -16,7 +16,8 @@ from io import BytesIO
 import pandas as pd
 from flask import Flask, render_template_string, request, send_file
 
-from config import CONDITIONS, PROVIDERS
+from compare import load_eval_data, run_comparison, _compute_summary
+from config import COMPARISON_TEMPERATURE, CONDITIONS, ENFORCEMENT_LEVELS, ENFORCEMENT_DESCRIPTIONS, PROVIDERS
 from data_loader import load_from_file
 from hooks import make_confidence_floor_hook
 from pipeline import run_consistency_check, run_pipeline
@@ -50,7 +51,11 @@ def require_any_api_key() -> None:
 require_any_api_key()
 
 
-def _base_ctx(use_hooks_default: bool = True, provider_default: str = "openai"):
+def _base_ctx(
+    use_hooks_default: bool = True,
+    provider_default: str = "openai",
+    enforcement_default: str = "E2",
+):
     return {
         "template_link": "/create_template",
         "max_rows": MAX_ROWS_PER_UPLOAD,
@@ -58,6 +63,9 @@ def _base_ctx(use_hooks_default: bool = True, provider_default: str = "openai"):
         "max_repeats": MAX_CONSISTENCY_REPEATS,
         "use_hooks_default": use_hooks_default,
         "provider_default": provider_default,
+        "enforcement_default": enforcement_default,
+        "enforcement_levels": list(ENFORCEMENT_LEVELS),
+        "enforcement_descriptions": ENFORCEMENT_DESCRIPTIONS,
     }
 
 
@@ -96,42 +104,47 @@ HTML_TEMPLATE = """
 <body>
     <h1>Research: Deterministic & Constrained LLM Behavior</h1>
     <p class="subtitle">Car auction price prediction as a use case — scientific process</p>
+    <p><a href="/compare" class="btn">E3 vs E5 Comparison (main experiment)</a></p>
 
     <div class="step">
         <div class="step-title">1. Observation</div>
-        <p>Same prompt → different predicted values each time. Asking the model to use only certain sources does not guarantee it will obey. We need ways to get consistent, rule-following behavior.</p>
+        <p>LLMs aren’t truly deterministic, and “please follow rules” is not enforcement. You don’t make the model obey by willpower — you build a system where the LLM only contributes inside a box, and anything outside the rules gets rejected, repaired, or replaced. The LLM is a component, not the authority.</p>
     </div>
     <div class="step">
         <div class="step-title">2. Question</div>
-        <p>How can we make LLM predictions (e.g. auction price) <strong>deterministic</strong> (consistent) and <strong>constrained</strong> (follow our rules), and how do we <strong>check quality</strong> so we only accept valid outputs?</p>
+        <p>How much can <strong>enforcement</strong> reduce invalid outputs and reduce variance in accepted outputs, and at what cost (retries, latency, throughput)? We measure: valid rate, retries per request, variance (CV), and time per accepted prediction.</p>
     </div>
     <div class="step">
         <div class="step-title">3. Hypothesis</div>
-        <p>We can combine: (1) <strong>structured output</strong> (strict JSON), (2) <strong>deterministic settings</strong> (temperature=0, seed), (3) a <strong>validation gate</strong> (reject invalid outputs in code), and (4) <strong>hook-style checks</strong> (pre/post/stop) to enforce constraints. Only outputs that pass all checks are accepted.</p>
+        <p>We build an enforcement system where invalid outputs cannot pass. We test an <strong>enforcement ladder</strong>: E0 (no enforcement) → E1 (schema only) → E2 (schema + validation gate) → E3 (E2 + retry/repair). Only outputs that pass the chosen level are accepted.</p>
     </div>
 
     <div class="step" id="experiment-section">
         <div class="step-title">4. Experiment</div>
-        <p>Upload a file with vehicles (Excel, CSV, TSV, or JSON). Choose a <strong>condition</strong> (P1–P4) to vary access rules. Each row is one prediction run. Max <strong>{{ max_rows }} rows</strong> per upload (each row calls the API).</p>
-        <p>Or run a <strong>consistency check</strong>: same vehicle, multiple repeats — to measure variance (non-determinism).</p>
+        <p>Upload a file with vehicles (Excel, CSV, TSV, or JSON). Choose <strong>Enforcement level</strong> (E0–E4) to test how much enforcement improves valid rate and reduces variance. Max <strong>{{ max_rows }} rows</strong> per upload.</p>
         <div class="upload">
             <form method="post" enctype="multipart/form-data">
                 <input type="file" name="file" accept=".xlsx,.xls,.csv,.tsv,.txt,.json,.jsonl" required>
                 <br><br>
-                <label>Provider:
+                <label>Enforcement:
+                    <select name="enforcement_level">
+                        {% for e in enforcement_levels %}
+                        <option value="{{ e }}" {{ 'selected' if enforcement_default == e else '' }}>{{ e }} — {{ enforcement_descriptions.get(e, '') }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label style="margin-left: 12px;">Provider:
                     <select name="provider">
                         <option value="openai" {{ 'selected' if provider_default == 'openai' else '' }}>OpenAI (GPT)</option>
                         <option value="claude" {{ 'selected' if provider_default == 'claude' else '' }}>Claude (Anthropic)</option>
                     </select>
                 </label>
-                <label style="margin-left: 12px;">Condition:
-                    <select name="condition">
-                        <option value="P1">P1 — Internal knowledge only</option>
-                        <option value="P2">P2 — Any source allowed</option>
-                        <option value="P3">P3 — Allowlist domains only</option>
-                        <option value="P4">P4 — No web access enforced</option>
-                    </select>
-                </label>
+                <label style="margin-left: 12px;">Condition (P1–P4): <select name="condition">
+                    <option value="P1">P1 — Internal only</option>
+                    <option value="P2">P2 — Any source</option>
+                    <option value="P3">P3 — Allowlist only</option>
+                    <option value="P4">P4 — No web</option>
+                </select></label>
                 <br><br>
                 <label><input type="checkbox" name="consistency_check" value="1"> Consistency check (first vehicle only, N repeats)</label>
                 <label style="margin-left: 12px;">Repeats: <input type="number" name="repeats" value="{{ repeats_default }}" min="2" max="{{ max_repeats }}" style="width: 4em;"></label>
@@ -170,6 +183,7 @@ HTML_TEMPLATE = """
                     <th>Conf.</th>
                     <th>Subgroup</th>
                     <th>Valid</th>
+                    {% if analysis.mean_retries is defined and analysis.mean_retries > 0 %}<th>Retries</th>{% endif %}
                     <th>Notes</th>
                 </tr>
             </thead>
@@ -186,6 +200,7 @@ HTML_TEMPLATE = """
                     <td>{{ "%.2f"|format(r.confidence) if r.confidence else 'N/A' }}</td>
                     <td>{{ r.subgroup_detected or 'N/A' }}</td>
                     <td class="{{ 'valid' if r.valid else 'invalid' }}">{{ 'Yes' if r.valid else 'No' }}</td>
+                    {% if analysis.mean_retries is defined and analysis.mean_retries > 0 %}<td>{{ r.retry_count or 0 }}</td>{% endif %}
                     <td>{{ (r.notes or '')[:50] }}</td>
                 </tr>
                 {% endfor %}
@@ -205,6 +220,7 @@ HTML_TEMPLATE = """
         <div class="analysis-grid">
             <div class="analysis-item"><span class="value">{{ analysis.n_total }}</span><br><span class="label">Rows</span></div>
             <div class="analysis-item"><span class="value">{{ "%.0f"|format(analysis.valid_rate_pct) }}%</span><br><span class="label">Valid rate</span></div>
+            <div class="analysis-item"><span class="value">{{ "%.2f"|format(analysis.mean_retries) if analysis.mean_retries is defined else '—' }}</span><br><span class="label">Mean retries</span></div>
             <div class="analysis-item"><span class="value">${{ "%.0f"|format(analysis.mean_price) if analysis.mean_price != none else '—' }}</span><br><span class="label">Mean price</span></div>
             <div class="analysis-item"><span class="value">${{ "%.0f"|format(analysis.std_price) if analysis.std_price != none else '—' }}</span><br><span class="label">Std price</span></div>
             <div class="analysis-item"><span class="value">{{ "%.1f"|format(analysis.cv) if analysis.cv != none else '—' }}%</span><br><span class="label">CV %</span></div>
@@ -236,6 +252,9 @@ def index():
         condition = request.form.get("condition", "P1")
         if condition not in CONDITIONS:
             condition = "P1"
+        enforcement_level = (request.form.get("enforcement_level") or "E2").upper()
+        if enforcement_level not in ENFORCEMENT_LEVELS:
+            enforcement_level = "E2"
         provider_id = (request.form.get("provider") or "openai").lower()
         if provider_id not in PROVIDERS:
             provider_id = "openai"
@@ -282,6 +301,7 @@ def index():
                     project_root=PROJECT_ROOT,
                     post_hook=post_hook,
                     provider_id=provider_id,
+                    enforcement_level=enforcement_level,
                 )
                 for i, payload in enumerate(payloads):
                     pred = payload.get("prediction") or {}
@@ -298,7 +318,9 @@ def index():
                         "valid": payload.get("valid", False),
                         "notes": pred.get("notes", ""),
                         "violation_reason": payload.get("violation_reason"),
+                        "retry_count": payload.get("retry_count", 0),
                     })
+                retries = [r.get("retry_count", 0) for r in results if isinstance(r.get("retry_count"), (int, float))]
                 analysis = {
                     "n_total": len(results),
                     "valid_rate_pct": (1.0 - vs.get("invalid_rate", 0)) * 100.0,
@@ -306,6 +328,7 @@ def index():
                     "std_price": vs.get("std"),
                     "cv": vs.get("cv"),
                     "consistency_check": True,
+                    "mean_retries": sum(retries) / len(retries) if retries else 0,
                 }
                 row_limit_msg = f" (consistency check: 1 vehicle × {n_repeats} repeats)"
             else:
@@ -320,6 +343,7 @@ def index():
                         project_root=PROJECT_ROOT,
                         post_hook=post_hook,
                         provider_id=provider_id,
+                        enforcement_level=enforcement_level,
                     )
                     pred = payload.get("prediction") or {}
                     results.append({
@@ -335,11 +359,13 @@ def index():
                         "valid": payload.get("valid", False),
                         "notes": pred.get("notes", ""),
                         "violation_reason": payload.get("violation_reason"),
+                        "retry_count": payload.get("retry_count", 0),
                     })
                 valid_prices = [r["predicted_price"] for r in results if r.get("valid") and r.get("predicted_price") is not None]
                 vs = variance_stats(valid_prices) if valid_prices else {}
                 n_total = len(results)
                 valid_count = sum(1 for r in results if r.get("valid"))
+                retries = [r.get("retry_count", 0) for r in results if isinstance(r.get("retry_count"), (int, float))]
                 analysis = {
                     "n_total": n_total,
                     "valid_rate_pct": (valid_count / n_total * 100.0) if n_total else 0.0,
@@ -347,6 +373,7 @@ def index():
                     "std_price": vs.get("std") if vs else None,
                     "cv": vs.get("cv") if vs else None,
                     "consistency_check": False,
+                    "mean_retries": sum(retries) / len(retries) if retries else 0,
                 }
             download_link = None
             if results:
@@ -357,6 +384,7 @@ def index():
                 download_link = f"/download/{out_name}"
             ctx["use_hooks_default"] = use_hooks
             ctx["provider_default"] = provider_id
+            ctx["enforcement_default"] = enforcement_level
             return render_template_string(
                 HTML_TEMPLATE,
                 **ctx,
@@ -417,6 +445,219 @@ def create_template_csv():
         download_name="vehicles_template.csv",
         mimetype="text/csv",
     )
+
+
+COMPARE_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>E3 vs E5 Comparison</title>
+    <style>
+        :root { --accent: #0d6efd; --valid: #198754; --invalid: #dc3545; --border: #dee2e6; --bg: #f8f9fa; }
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 24px; line-height: 1.5; color: #212529; }
+        h1 { font-size: 1.5rem; }
+        h2 { font-size: 1.15rem; color: #495057; margin-top: 1.5rem; }
+        .subtitle { color: #6c757d; margin-bottom: 1.5rem; }
+        .step { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.25rem; margin: 0.75rem 0; }
+        .step-title { font-weight: 600; color: var(--accent); margin-bottom: 0.35rem; }
+        .btn { background: var(--accent); color: #fff; padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; text-decoration: none; display: inline-block; font-size: 0.95rem; }
+        .btn:hover { filter: brightness(0.95); }
+        .btn-secondary { background: #6c757d; }
+        table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.9rem; }
+        th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+        th { background: #e9ecef; font-weight: 600; }
+        .supported { color: var(--valid); font-weight: 700; }
+        .not-supported { color: var(--invalid); font-weight: 700; }
+        .partial { color: #fd7e14; font-weight: 700; }
+        .error { color: var(--invalid); padding: 10px; background: #f8d7da; border-radius: 6px; margin: 10px 0; }
+        .info { padding: 10px; background: #cfe2ff; border-radius: 6px; margin: 10px 0; color: #084298; }
+        .metric-row td:nth-child(2), .metric-row td:nth-child(3) { text-align: right; font-variant-numeric: tabular-nums; }
+        .winner { background: #d1e7dd; }
+        .hypothesis { margin: 6px 0; padding: 8px 12px; border-radius: 6px; }
+    </style>
+</head>
+<body>
+    <h1>E3 vs E5: Where Should the AI Stop?</h1>
+    <p class="subtitle">Head-to-head comparison: LLM predicts price directly (E3) vs LLM extracts features + code computes price (E5)</p>
+    <p><a href="/" class="btn btn-secondary">Back to main experiment</a></p>
+
+    <div class="step">
+        <div class="step-title">Hypotheses (stated before running)</div>
+        <ul>
+            <li><strong>H1:</strong> Pipeline B (E5) will have lower price CV than Pipeline A (E3)</li>
+            <li><strong>H2:</strong> Pipeline B will have lower MAE against ground truth</li>
+            <li><strong>H3:</strong> LLM feature assignments will be more consistent across repeats than LLM price outputs</li>
+            <li><strong>H4:</strong> Pipeline A-prime (free features + formula) will perform worse than Pipeline B</li>
+        </ul>
+    </div>
+
+    <div class="step">
+        <div class="step-title">Run Comparison</div>
+        <form method="post">
+            <label>Provider:
+                <select name="provider">
+                    <option value="openai">OpenAI (GPT)</option>
+                    <option value="claude">Claude (Anthropic)</option>
+                </select>
+            </label>
+            <label style="margin-left: 12px;">Vehicles:
+                <input type="number" name="n_vehicles" value="10" min="1" max="200" style="width: 5em;">
+            </label>
+            <label style="margin-left: 12px;">Repeats per vehicle:
+                <input type="number" name="n_repeats" value="5" min="2" max="10" style="width: 4em;">
+            </label>
+            <label style="margin-left: 12px;"><input type="checkbox" name="mock" value="1"> Mock LLM (for testing)</label>
+            <br><br>
+            <button type="submit" class="btn">Run E3 vs E5 comparison</button>
+            <span style="font-size: 0.85rem; color: #6c757d; margin-left: 8px;">Temperature: {{ temperature }} (set in config)</span>
+        </form>
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+        {% if running %}
+        <div class="info">Running comparison... This may take a few minutes for many vehicles.</div>
+        {% endif %}
+    </div>
+
+    {% if summary %}
+    <div class="step">
+        <div class="step-title">Results: Head-to-Head Metrics</div>
+        <p>{{ n_vehicles }} vehicles, {{ n_repeats }} repeats each, provider: {{ provider }}, temperature: {{ temperature }}</p>
+        <table>
+            <thead>
+                <tr><th>Metric</th><th>E3 (LLM predicts price)</th><th>E5 (LLM extracts features)</th></tr>
+            </thead>
+            <tbody>
+                {% for row in metric_rows %}
+                <tr class="metric-row">
+                    <td>{{ row.label }}</td>
+                    <td class="{{ 'winner' if row.e3_wins else '' }}">{{ row.e3_val }}</td>
+                    <td class="{{ 'winner' if row.e5_wins else '' }}">{{ row.e5_val }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="step">
+        <div class="step-title">Hypothesis Assessment</div>
+        {% for h in hypotheses %}
+        <div class="hypothesis" style="background: {{ '#d1e7dd' if h.status == 'SUPPORTED' else '#f8d7da' if h.status == 'NOT SUPPORTED' else '#fff3cd' }};">
+            <strong>{{ h.id }}:</strong> {{ h.text }}
+            <span class="{{ 'supported' if h.status == 'SUPPORTED' else 'not-supported' if h.status == 'NOT SUPPORTED' else 'partial' }}">{{ h.status }}</span>
+            <br><span style="font-size: 0.85rem; color: #495057;">{{ h.evidence }}</span>
+        </div>
+        {% endfor %}
+    </div>
+
+    {% if elapsed %}
+    <p style="font-size: 0.85rem; color: #6c757d;">Elapsed: {{ elapsed }}s</p>
+    {% endif %}
+    {% endif %}
+</body>
+</html>
+"""
+
+
+@app.route("/compare", methods=["GET", "POST"])
+def compare_view():
+    ctx = {"temperature": COMPARISON_TEMPERATURE}
+    if request.method == "POST":
+        provider = (request.form.get("provider") or "openai").lower()
+        try:
+            n_vehicles = min(200, max(1, int(request.form.get("n_vehicles", 10))))
+        except (TypeError, ValueError):
+            n_vehicles = 10
+        try:
+            n_repeats = min(10, max(2, int(request.form.get("n_repeats", 5))))
+        except (TypeError, ValueError):
+            n_repeats = 5
+        use_mock = request.form.get("mock") == "1"
+
+        if provider == "claude" and not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            return render_template_string(COMPARE_TEMPLATE, **ctx, error="ANTHROPIC_API_KEY required for Claude.")
+        if provider == "openai" and not use_mock and not os.environ.get("OPENAI_API_KEY", "").strip():
+            return render_template_string(COMPARE_TEMPLATE, **ctx, error="OPENAI_API_KEY required for OpenAI.")
+
+        try:
+            import time as _time
+            start = _time.time()
+            vehicles = load_eval_data(limit=n_vehicles)
+            result = run_comparison(
+                vehicles=vehicles,
+                n_repeats=n_repeats,
+                provider=provider,
+                use_mock=use_mock if use_mock else None,
+            )
+            elapsed = round(_time.time() - start, 1)
+            summary = result["summary"]
+            e3 = summary.get("E3", {})
+            e5 = summary.get("E5", {})
+
+            metric_rows = []
+
+            def _add(label, key, fmt=".2f", lower_better=True):
+                e3v = e3.get(key, "N/A")
+                e5v = e5.get(key, "N/A")
+                e3_num = isinstance(e3v, (int, float))
+                e5_num = isinstance(e5v, (int, float))
+                if lower_better:
+                    e3w = e3_num and e5_num and e3v < e5v
+                    e5w = e3_num and e5_num and e5v < e3v
+                else:
+                    e3w = e3_num and e5_num and e3v > e5v
+                    e5w = e3_num and e5_num and e5v > e3v
+                metric_rows.append({
+                    "label": label,
+                    "e3_val": f"{e3v:{fmt}}" if e3_num else str(e3v),
+                    "e5_val": f"{e5v:{fmt}}" if e5_num else str(e5v),
+                    "e3_wins": e3w, "e5_wins": e5w,
+                })
+
+            _add("Valid rate", "mean_valid_rate", ".4f", lower_better=False)
+            _add("Mean retries", "mean_retries", ".2f", lower_better=True)
+            _add("Price CV (%)", "mean_cv", ".2f", lower_better=True)
+            _add("MAE ($)", "mean_mae", ".0f", lower_better=True)
+            _add("Within 10% of actual (%)", "pct_within_10", ".1f", lower_better=False)
+            stab = e5.get("mean_feature_stability")
+            if stab is not None:
+                metric_rows.append({
+                    "label": "Feature stability (E5 only)",
+                    "e3_val": "---",
+                    "e5_val": f"{stab:.4f}",
+                    "e3_wins": False, "e5_wins": False,
+                })
+
+            h1_ok = e5.get("mean_cv", 999) < e3.get("mean_cv", 999)
+            h2_ok = e5.get("mean_mae", 999) < e3.get("mean_mae", 999)
+            h3_stab = e5.get("mean_feature_stability", 0)
+            h3_ok = "SUPPORTED" if h3_stab > 0.8 else "PARTIAL" if h3_stab > 0.6 else "NOT SUPPORTED"
+
+            hypotheses = [
+                {"id": "H1", "text": "E5 lower CV than E3",
+                 "status": "SUPPORTED" if h1_ok else "NOT SUPPORTED",
+                 "evidence": f"E3 CV={e3.get('mean_cv', 'N/A'):.2f}%, E5 CV={e5.get('mean_cv', 'N/A'):.2f}%"},
+                {"id": "H2", "text": "E5 lower MAE than E3",
+                 "status": "SUPPORTED" if h2_ok else "NOT SUPPORTED",
+                 "evidence": f"E3 MAE=${e3.get('mean_mae', 0):,.0f}, E5 MAE=${e5.get('mean_mae', 0):,.0f}"},
+                {"id": "H3", "text": "Features more stable than prices",
+                 "status": h3_ok,
+                 "evidence": f"Feature stability={h3_stab:.4f}, E3 price CV={e3.get('mean_cv', 0):.2f}%"},
+                {"id": "H4", "text": "A-prime worse than B (enforcement placement matters)",
+                 "status": "REQUIRES ABLATION",
+                 "evidence": "Ablation run (Pipeline A-prime) not yet implemented in web UI"},
+            ]
+
+            return render_template_string(
+                COMPARE_TEMPLATE, **ctx,
+                summary=summary, metric_rows=metric_rows, hypotheses=hypotheses,
+                n_vehicles=n_vehicles, n_repeats=n_repeats,
+                provider=provider, elapsed=elapsed,
+            )
+        except Exception as e:
+            return render_template_string(COMPARE_TEMPLATE, **ctx, error=f"Error: {e}")
+
+    return render_template_string(COMPARE_TEMPLATE, **ctx)
 
 
 if __name__ == "__main__":
