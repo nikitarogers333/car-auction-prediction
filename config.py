@@ -4,7 +4,14 @@ Experiment conditions P1–P4 and deterministic controls.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from dataclasses import dataclass
+
+# Railway: use RAILWAY_VOLUME_MOUNT_PATH if set, else /data if it exists, else project data/
+_REG_ROOT = Path(__file__).resolve().parent
+_mount = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+REGRESSION_DATA_DIR = Path(_mount) if _mount else (Path("/data") if Path("/data").exists() else _REG_ROOT / "data")
 from typing import Any
 
 # P1: Internal knowledge only — no external tools

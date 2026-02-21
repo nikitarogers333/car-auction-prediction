@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -20,7 +21,7 @@ import subprocess
 from flask import Flask, jsonify, render_template_string, request, send_file
 
 from compare import load_eval_data, run_comparison
-from config import COMPARISON_TEMPERATURE, CONDITIONS, ENFORCEMENT_LEVELS, ENFORCEMENT_DESCRIPTIONS, PROVIDERS
+from config import COMPARISON_TEMPERATURE, CONDITIONS, ENFORCEMENT_LEVELS, ENFORCEMENT_DESCRIPTIONS, PROVIDERS, REGRESSION_DATA_DIR
 from regression_predictor import models_available as regression_models_available
 from data_loader import load_from_file
 from hooks import make_confidence_floor_hook
@@ -53,6 +54,28 @@ def require_any_api_key() -> None:
 
 
 require_any_api_key()
+
+
+def _startup_retrain() -> None:
+    """Auto-retrain on startup if car_prices exists but pkl files do not (e.g. after deploy with persisted CSV)."""
+    csv_path = REGRESSION_DATA_DIR / "car_prices.csv"
+    xlsx_path = REGRESSION_DATA_DIR / "car_prices.xlsx"
+    xls_path = REGRESSION_DATA_DIR / "car_prices.xls"
+    pkl_path = REGRESSION_DATA_DIR / "random_forest_model.pkl"
+    data_path = csv_path if csv_path.exists() else (xlsx_path if xlsx_path.exists() else xls_path if xls_path.exists() else None)
+    if data_path and not pkl_path.exists():
+        try:
+            subprocess.run(
+                ["python3", str(PROJECT_ROOT / "regression_baseline.py"), str(data_path)],
+                capture_output=True, timeout=600, cwd=str(PROJECT_ROOT),
+            )
+        except Exception:
+            pass
+
+
+_thread = threading.Thread(target=_startup_retrain)
+_thread.daemon = True
+_thread.start()
 
 
 def _base_ctx(
@@ -564,7 +587,7 @@ COMPARE_TEMPLATE = """
     </div>
 
     <script>
-    // Training upload (async)
+    // Training upload: save immediately, poll for completion (avoids Railway timeout)
     document.getElementById('train-form').addEventListener('submit', async function(e) {
         e.preventDefault();
         const fileInput = document.getElementById('training-file');
@@ -573,22 +596,40 @@ COMPARE_TEMPLATE = """
         const btn = document.getElementById('train-btn');
         btn.disabled = true;
         statusDiv.style.display = 'block';
-        statusDiv.innerHTML = '<div class="info"><span class="spinner"></span> Training... this takes ~3 minutes. Do not close this page.</div>';
+        statusDiv.innerHTML = '<div class="info"><span class="spinner"></span> Uploading...</div>';
         const formData = new FormData();
         formData.append('training_file', fileInput.files[0]);
         try {
             const resp = await fetch('/upload-training-data', { method: 'POST', body: formData });
             const data = await resp.json();
-            if (data.success) {
-                statusDiv.innerHTML = '<div class="success">Training complete! ' + escapeHtml(data.message) + '</div>';
-                document.getElementById('training-current-status').innerHTML = '<div class="success">Regression models trained. ' + escapeHtml(data.message) + '</div>';
+            if (data.success && data.status === 'saved') {
+                statusDiv.innerHTML = '<div class="info"><span class="spinner"></span> Training in background (~3 min). Polling every 10s...</div>';
+                const pollInterval = setInterval(async function() {
+                    try {
+                        const st = await fetch('/training-status');
+                        const stData = await st.json();
+                        if (stData.available) {
+                            clearInterval(pollInterval);
+                            const msg = stData.message || 'Models trained.';
+                            statusDiv.innerHTML = '<div class="success">Training complete! ' + escapeHtml(msg) + '</div>';
+                            document.getElementById('training-current-status').innerHTML = '<div class="success">Regression models trained. ' + escapeHtml(msg) + '</div>';
+                            btn.disabled = false;
+                        }
+                    } catch (er) {}
+                }, 10000);
+                btn.disabled = false;
+            } else if (data.success) {
+                statusDiv.innerHTML = '<div class="success">Training complete! ' + escapeHtml(data.message || '') + '</div>';
+                document.getElementById('training-current-status').innerHTML = '<div class="success">Regression models trained. ' + escapeHtml(data.message || '') + '</div>';
+                btn.disabled = false;
             } else {
-                statusDiv.innerHTML = '<div class="error">Training failed: ' + data.error + '</div>';
+                statusDiv.innerHTML = '<div class="error">Upload failed: ' + escapeHtml(data.error || '') + '</div>';
+                btn.disabled = false;
             }
         } catch (err) {
-            statusDiv.innerHTML = '<div class="error">Request failed: ' + err.message + '</div>';
+            statusDiv.innerHTML = '<div class="error">Request failed: ' + escapeHtml(err.message) + '</div>';
+            btn.disabled = false;
         }
-        btn.disabled = false;
     });
 
     // Comparison form: fetch async, render results when done
@@ -673,9 +714,21 @@ COMPARE_TEMPLATE = """
 """
 
 
+def _run_training_background(dest: Path) -> None:
+    """Run regression baseline in subprocess. Runs in background thread."""
+    try:
+        subprocess.run(
+            ["python3", str(PROJECT_ROOT / "regression_baseline.py"), str(dest)],
+            capture_output=True, text=True, timeout=600,
+            cwd=str(PROJECT_ROOT),
+        )
+    except Exception:
+        pass
+
+
 @app.route("/upload-training-data", methods=["POST"])
 def upload_training_data():
-    """Save uploaded CSV/Excel and train regression models."""
+    """Save uploaded CSV/Excel immediately; start training in background to avoid timeout."""
     if "training_file" not in request.files:
         return jsonify({"success": False, "error": "No file uploaded"})
     f = request.files["training_file"]
@@ -684,46 +737,35 @@ def upload_training_data():
     suffix = Path(f.filename).suffix.lower()
     if suffix not in (".csv", ".xlsx", ".xls"):
         return jsonify({"success": False, "error": "File must be .csv, .xlsx, or .xls"})
-    dest = DATA_DIR / ("car_prices" + suffix)
+    dest = REGRESSION_DATA_DIR / ("car_prices" + suffix)
     try:
+        REGRESSION_DATA_DIR.mkdir(parents=True, exist_ok=True)
         f.save(str(dest))
     except Exception as e:
         return jsonify({"success": False, "error": f"Failed to save file: {e}"})
-    try:
-        result = subprocess.run(
-            ["python3", str(PROJECT_ROOT / "regression_baseline.py"), str(dest)],
-            capture_output=True, text=True, timeout=600,
-            cwd=str(PROJECT_ROOT),
-        )
-        if result.returncode != 0:
-            return jsonify({"success": False, "error": result.stderr or result.stdout or "Training script failed"})
-        metrics_path = DATA_DIR / "training_metrics.json"
-        if metrics_path.exists():
-            with open(metrics_path, encoding="utf-8") as mf:
-                m = json.load(mf)
-            msg = f"RF MAE: ${m.get('rf_mae', 0):,.0f}, R²={m.get('rf_r2', 0):.4f} | XGB MAE: ${m.get('xgb_mae', 0):,.0f}, R²={m.get('xgb_r2', 0):.4f}"
-            features = m.get("features_used", [])
-            if features:
-                msg += f". Features used: {', '.join(features)}"
-        else:
-            msg = "Models trained."
-        return jsonify({"success": True, "message": msg})
-    except subprocess.TimeoutExpired:
-        return jsonify({"success": False, "error": "Training timed out (>10 min)"})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+    threading.Thread(target=_run_training_background, args=(dest,), daemon=True).start()
+    return jsonify({"success": True, "status": "saved", "message": "File saved. Training started in background. Poll for completion."})
 
 
 @app.route("/training-status", methods=["GET"])
 def training_status():
-    """Check if regression models are trained."""
+    """Check if regression models are trained; returns metrics when available."""
     avail = regression_models_available()
     ts = ""
+    message = ""
     if avail:
-        pkl = DATA_DIR / "random_forest_model.pkl"
+        pkl = REGRESSION_DATA_DIR / "random_forest_model.pkl"
         if pkl.exists():
             ts = datetime.fromtimestamp(pkl.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    return jsonify({"available": avail, "timestamp": ts})
+        metrics_path = REGRESSION_DATA_DIR / "training_metrics.json"
+        if metrics_path.exists():
+            with open(metrics_path, encoding="utf-8") as mf:
+                m = json.load(mf)
+            message = f"RF MAE: ${m.get('rf_mae', 0):,.0f}, R²={m.get('rf_r2', 0):.4f} | XGB MAE: ${m.get('xgb_mae', 0):,.0f}, R²={m.get('xgb_r2', 0):.4f}"
+            features = m.get("features_used", [])
+            if features:
+                message += f". Features used: {', '.join(features)}"
+    return jsonify({"available": avail, "timestamp": ts, "message": message})
 
 
 def _safe_fmt(val, fmt):
@@ -883,10 +925,10 @@ def compare_view():
     training_ts = ""
     training_features = ""
     if reg_avail:
-        pkl = DATA_DIR / "random_forest_model.pkl"
+        pkl = REGRESSION_DATA_DIR / "random_forest_model.pkl"
         if pkl.exists():
             training_ts = datetime.fromtimestamp(pkl.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        metrics_path = DATA_DIR / "training_metrics.json"
+        metrics_path = REGRESSION_DATA_DIR / "training_metrics.json"
         if metrics_path.exists():
             with open(metrics_path, encoding="utf-8") as mf:
                 m = json.load(mf)

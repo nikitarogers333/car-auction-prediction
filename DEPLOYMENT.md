@@ -56,12 +56,17 @@ git push -u origin main
    - Add **OPENAI_API_KEY** (for OpenAI) and/or **ANTHROPIC_API_KEY** (for Claude). At least one is required; add both to compare providers in the web app.
    - Railway will restart the app automatically
 
-4. **Deploy:**
+4. **Optional: Persistent volume for regression models**
+   - Add a volume in Railway (Command Palette → Add Volume)
+   - Set mount path to `/data` (or set `RAILWAY_VOLUME_MOUNT_PATH` in Variables)
+   - Training data and models persist across deploys; app auto-retrains on startup if CSV exists but pkl files do not
+
+5. **Deploy:**
    - Railway auto-deploys when you push to GitHub
    - Or click "Deploy" in the dashboard
    - Wait ~2-3 minutes for build
 
-5. **Get your URL:**
+6. **Get your URL:**
    - Railway gives you a URL like `https://your-app-name.up.railway.app`
    - Share this with your professor!
 

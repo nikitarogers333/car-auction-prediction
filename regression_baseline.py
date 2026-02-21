@@ -18,7 +18,9 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import cross_val_score
 from sklearn.preprocessing import LabelEncoder
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
+from config import REGRESSION_DATA_DIR
+
+DATA_DIR = REGRESSION_DATA_DIR
 KAGGLE_CSV = DATA_DIR / "car_prices.csv"
 
 # Internal names -> possible external column names (case-insensitive)

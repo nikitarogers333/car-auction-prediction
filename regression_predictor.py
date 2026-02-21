@@ -13,7 +13,9 @@ from typing import Any
 
 import numpy as np
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
+from config import REGRESSION_DATA_DIR
+
+DATA_DIR = REGRESSION_DATA_DIR
 RF_PATH = DATA_DIR / "random_forest_model.pkl"
 XGB_PATH = DATA_DIR / "xgboost_model.pkl"
 ENCODERS_PATH = DATA_DIR / "label_encoders.pkl"
@@ -92,7 +94,7 @@ def _build_feature_vector(
     values["condition"] = float(condition) if condition else _medians.get("condition", numeric_defaults["condition"])
     values["mmr"] = float(mmr) if mmr else _medians.get("mmr", numeric_defaults["mmr"])
 
-    for col in ["make", "model", "body", "transmission", "color", "interior", "fuel_type"]:
+    for col in ["make", "model", "body", "transmission", "color", "interior", "fuel_type", "drive"]:
         val = locals().get(col, "") or kwargs.get(col, "")
         values[col] = _encode_value(col, str(val) if val else "")
 
