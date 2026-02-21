@@ -18,6 +18,9 @@ ENV/
 data/*.xlsx
 data/*.xls
 !data/template.xlsx
+data/*.pkl
+data/car_prices.csv
+data/comparison_results.json
 eval/*.json
 logs/*.jsonl
 

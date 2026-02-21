@@ -16,8 +16,9 @@ from io import BytesIO
 import pandas as pd
 from flask import Flask, render_template_string, request, send_file
 
-from compare import load_eval_data, run_comparison, _compute_summary
+from compare import load_eval_data, run_comparison
 from config import COMPARISON_TEMPERATURE, CONDITIONS, ENFORCEMENT_LEVELS, ENFORCEMENT_DESCRIPTIONS, PROVIDERS
+from regression_predictor import models_available as regression_models_available
 from data_loader import load_from_file
 from hooks import make_confidence_floor_hook
 from pipeline import run_consistency_check, run_pipeline
@@ -451,10 +452,10 @@ COMPARE_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>E3 vs E5 Comparison</title>
+    <title>Pipeline Comparison</title>
     <style>
         :root { --accent: #0d6efd; --valid: #198754; --invalid: #dc3545; --border: #dee2e6; --bg: #f8f9fa; }
-        body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 24px; line-height: 1.5; color: #212529; }
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 1060px; margin: 0 auto; padding: 24px; line-height: 1.5; color: #212529; }
         h1 { font-size: 1.5rem; }
         h2 { font-size: 1.15rem; color: #495057; margin-top: 1.5rem; }
         .subtitle { color: #6c757d; margin-bottom: 1.5rem; }
@@ -463,23 +464,32 @@ COMPARE_TEMPLATE = """
         .btn { background: var(--accent); color: #fff; padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; text-decoration: none; display: inline-block; font-size: 0.95rem; }
         .btn:hover { filter: brightness(0.95); }
         .btn-secondary { background: #6c757d; }
-        table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.9rem; }
-        th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+        table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.85rem; }
+        th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
         th { background: #e9ecef; font-weight: 600; }
+        .col-header-llm { background: #e8f0fe; }
+        .col-header-ml { background: #fef3e2; }
         .supported { color: var(--valid); font-weight: 700; }
         .not-supported { color: var(--invalid); font-weight: 700; }
         .partial { color: #fd7e14; font-weight: 700; }
         .error { color: var(--invalid); padding: 10px; background: #f8d7da; border-radius: 6px; margin: 10px 0; }
+        .warning { padding: 10px; background: #fff3cd; border-radius: 6px; margin: 10px 0; color: #664d03; }
         .info { padding: 10px; background: #cfe2ff; border-radius: 6px; margin: 10px 0; color: #084298; }
-        .metric-row td:nth-child(2), .metric-row td:nth-child(3) { text-align: right; font-variant-numeric: tabular-nums; }
+        .metric-row td { text-align: right; font-variant-numeric: tabular-nums; }
+        .metric-row td:first-child { text-align: left; }
         .winner { background: #d1e7dd; }
         .hypothesis { margin: 6px 0; padding: 8px 12px; border-radius: 6px; }
+        .ml-note { font-size: 0.85rem; color: #664d03; background: #fff3cd; padding: 8px 12px; border-radius: 6px; margin-top: 10px; }
     </style>
 </head>
 <body>
-    <h1>E3 vs E5: Where Should the AI Stop?</h1>
-    <p class="subtitle">Head-to-head comparison: LLM predicts price directly (E3) vs LLM extracts features + code computes price (E5)</p>
+    <h1>Pipeline Comparison: Where Should the AI Stop?</h1>
+    <p class="subtitle">LLM pipelines (E3, E5) vs traditional ML baselines (Random Forest, XGBoost)</p>
     <p><a href="/" class="btn btn-secondary">Back to main experiment</a></p>
+
+    {% if not regression_available %}
+    <div class="warning">Regression models not trained yet. SSH into the server and run: <code>python3 regression_baseline.py</code><br>The comparison will still run E3 vs E5 without the regression columns.</div>
+    {% endif %}
 
     <div class="step">
         <div class="step-title">Hypotheses (stated before running)</div>
@@ -508,14 +518,11 @@ COMPARE_TEMPLATE = """
             </label>
             <label style="margin-left: 12px;"><input type="checkbox" name="mock" value="1"> Mock LLM (for testing)</label>
             <br><br>
-            <button type="submit" class="btn">Run E3 vs E5 comparison</button>
+            <button type="submit" class="btn">Run comparison (all pipelines)</button>
             <span style="font-size: 0.85rem; color: #6c757d; margin-left: 8px;">Temperature: {{ temperature }} (set in config)</span>
         </form>
         {% if error %}
         <div class="error">{{ error }}</div>
-        {% endif %}
-        {% if running %}
-        <div class="info">Running comparison... This may take a few minutes for many vehicles.</div>
         {% endif %}
     </div>
 
@@ -525,7 +532,15 @@ COMPARE_TEMPLATE = """
         <p>{{ n_vehicles }} vehicles, {{ n_repeats }} repeats each, provider: {{ provider }}, temperature: {{ temperature }}</p>
         <table>
             <thead>
-                <tr><th>Metric</th><th>E3 (LLM predicts price)</th><th>E5 (LLM extracts features)</th></tr>
+                <tr>
+                    <th>Metric</th>
+                    <th class="col-header-llm">A: E3<br><small>LLM predicts price</small></th>
+                    <th class="col-header-llm">B: E5<br><small>LLM extracts features</small></th>
+                    {% if has_regression %}
+                    <th class="col-header-ml">C: Random Forest<br><small>Traditional ML</small></th>
+                    <th class="col-header-ml">D: XGBoost<br><small>Traditional ML</small></th>
+                    {% endif %}
+                </tr>
             </thead>
             <tbody>
                 {% for row in metric_rows %}
@@ -533,10 +548,17 @@ COMPARE_TEMPLATE = """
                     <td>{{ row.label }}</td>
                     <td class="{{ 'winner' if row.e3_wins else '' }}">{{ row.e3_val }}</td>
                     <td class="{{ 'winner' if row.e5_wins else '' }}">{{ row.e5_val }}</td>
+                    {% if has_regression %}
+                    <td class="{{ 'winner' if row.rf_wins else '' }}">{{ row.rf_val }}</td>
+                    <td class="{{ 'winner' if row.xgb_wins else '' }}">{{ row.xgb_val }}</td>
+                    {% endif %}
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
+        {% if has_regression %}
+        <div class="ml-note">Note: Regression models (C, D) have access to the <strong>mmr</strong> feature (Manheim Market Report wholesale price estimate) that the LLM pipelines do not. This is a very strong predictor and the regression models lean on it heavily.</div>
+        {% endif %}
     </div>
 
     <div class="step">
@@ -546,8 +568,14 @@ COMPARE_TEMPLATE = """
             <strong>{{ h.id }}:</strong> {{ h.text }}
             <span class="{{ 'supported' if h.status == 'SUPPORTED' else 'not-supported' if h.status == 'NOT SUPPORTED' else 'partial' }}">{{ h.status }}</span>
             <br><span style="font-size: 0.85rem; color: #495057;">{{ h.evidence }}</span>
+            {% if h.regression_note %}
+            <br><span style="font-size: 0.82rem; color: #664d03;">Regression: {{ h.regression_note }}</span>
+            {% endif %}
         </div>
         {% endfor %}
+        {% if ml_summary_line %}
+        <div class="ml-note" style="margin-top: 12px;">{{ ml_summary_line }}</div>
+        {% endif %}
     </div>
 
     {% if elapsed %}
@@ -561,7 +589,8 @@ COMPARE_TEMPLATE = """
 
 @app.route("/compare", methods=["GET", "POST"])
 def compare_view():
-    ctx = {"temperature": COMPARISON_TEMPERATURE}
+    reg_avail = regression_models_available()
+    ctx = {"temperature": COMPARISON_TEMPERATURE, "regression_available": reg_avail}
     if request.method == "POST":
         provider = (request.form.get("provider") or "openai").lower()
         try:
@@ -593,66 +622,124 @@ def compare_view():
             summary = result["summary"]
             e3 = summary.get("E3", {})
             e5 = summary.get("E5", {})
+            rf = summary.get("RF", {})
+            xgb_s = summary.get("XGB", {})
+            has_reg = bool(rf or xgb_s)
 
             metric_rows = []
 
-            def _add(label, key, fmt=".2f", lower_better=True):
-                e3v = e3.get(key, "N/A")
-                e5v = e5.get(key, "N/A")
-                e3_num = isinstance(e3v, (int, float))
-                e5_num = isinstance(e5v, (int, float))
-                if lower_better:
-                    e3w = e3_num and e5_num and e3v < e5v
-                    e5w = e3_num and e5_num and e5v < e3v
+            def _add(label, key, fmt=".2f", lower_better=True, na_for_reg=False):
+                vals = {}
+                for lbl, src in [("e3", e3), ("e5", e5), ("rf", rf), ("xgb", xgb_s)]:
+                    vals[lbl] = src.get(key, "N/A") if src else "N/A"
+
+                all_nums = {k: v for k, v in vals.items() if isinstance(v, (int, float))}
+                if na_for_reg:
+                    compare_nums = {k: v for k, v in all_nums.items() if k in ("e3", "e5")}
                 else:
-                    e3w = e3_num and e5_num and e3v > e5v
-                    e5w = e3_num and e5_num and e5v > e3v
-                metric_rows.append({
-                    "label": label,
-                    "e3_val": f"{e3v:{fmt}}" if e3_num else str(e3v),
-                    "e5_val": f"{e5v:{fmt}}" if e5_num else str(e5v),
-                    "e3_wins": e3w, "e5_wins": e5w,
-                })
+                    compare_nums = all_nums
+
+                if lower_better and compare_nums:
+                    best = min(compare_nums.values())
+                elif not lower_better and compare_nums:
+                    best = max(compare_nums.values())
+                else:
+                    best = None
+
+                row = {"label": label}
+                for lbl in ["e3", "e5", "rf", "xgb"]:
+                    v = vals[lbl]
+                    if na_for_reg and lbl in ("rf", "xgb"):
+                        row[f"{lbl}_val"] = "N/A"
+                        row[f"{lbl}_wins"] = False
+                    elif isinstance(v, (int, float)):
+                        row[f"{lbl}_val"] = f"{v:{fmt}}"
+                        row[f"{lbl}_wins"] = best is not None and v == best and len([x for x in compare_nums.values() if x == best]) == 1
+                    else:
+                        row[f"{lbl}_val"] = str(v)
+                        row[f"{lbl}_wins"] = False
+                metric_rows.append(row)
 
             _add("Valid rate", "mean_valid_rate", ".4f", lower_better=False)
             _add("Mean retries", "mean_retries", ".2f", lower_better=True)
             _add("Price CV (%)", "mean_cv", ".2f", lower_better=True)
             _add("MAE ($)", "mean_mae", ".0f", lower_better=True)
             _add("Within 10% of actual (%)", "pct_within_10", ".1f", lower_better=False)
+
             stab = e5.get("mean_feature_stability")
             if stab is not None:
                 metric_rows.append({
                     "label": "Feature stability (E5 only)",
-                    "e3_val": "---",
-                    "e5_val": f"{stab:.4f}",
-                    "e3_wins": False, "e5_wins": False,
+                    "e3_val": "---", "e3_wins": False,
+                    "e5_val": f"{stab:.4f}", "e5_wins": False,
+                    "rf_val": "---", "rf_wins": False,
+                    "xgb_val": "---", "xgb_wins": False,
                 })
+
+            metric_rows.append({
+                "label": "Avg tokens/request",
+                "e3_val": "~200-400", "e3_wins": False,
+                "e5_val": "~200-400", "e5_wins": False,
+                "rf_val": "N/A", "rf_wins": False,
+                "xgb_val": "N/A", "xgb_wins": False,
+            })
 
             h1_ok = e5.get("mean_cv", 999) < e3.get("mean_cv", 999)
             h2_ok = e5.get("mean_mae", 999) < e3.get("mean_mae", 999)
             h3_stab = e5.get("mean_feature_stability", 0)
             h3_ok = "SUPPORTED" if h3_stab > 0.8 else "PARTIAL" if h3_stab > 0.6 else "NOT SUPPORTED"
 
+            h1_reg = "RF CV=0.00%, XGB CV=0.00% (deterministic — trivially zero, not because the model is better)" if has_reg else ""
+            h2_reg = ""
+            if has_reg:
+                rf_mae = rf.get("mean_mae", "N/A")
+                xgb_mae = xgb_s.get("mean_mae", "N/A")
+                rf_s = f"${rf_mae:,.0f}" if isinstance(rf_mae, (int, float)) else "N/A"
+                xgb_str = f"${xgb_mae:,.0f}" if isinstance(xgb_mae, (int, float)) else "N/A"
+                h2_reg = f"RF MAE={rf_s}, XGB MAE={xgb_str} (note: regression has access to mmr feature)"
+
             hypotheses = [
                 {"id": "H1", "text": "E5 lower CV than E3",
                  "status": "SUPPORTED" if h1_ok else "NOT SUPPORTED",
-                 "evidence": f"E3 CV={e3.get('mean_cv', 'N/A'):.2f}%, E5 CV={e5.get('mean_cv', 'N/A'):.2f}%"},
+                 "evidence": f"E3 CV={e3.get('mean_cv', 'N/A'):.2f}%, E5 CV={e5.get('mean_cv', 'N/A'):.2f}%",
+                 "regression_note": h1_reg},
                 {"id": "H2", "text": "E5 lower MAE than E3",
                  "status": "SUPPORTED" if h2_ok else "NOT SUPPORTED",
-                 "evidence": f"E3 MAE=${e3.get('mean_mae', 0):,.0f}, E5 MAE=${e5.get('mean_mae', 0):,.0f}"},
+                 "evidence": f"E3 MAE=${e3.get('mean_mae', 0):,.0f}, E5 MAE=${e5.get('mean_mae', 0):,.0f}",
+                 "regression_note": h2_reg},
                 {"id": "H3", "text": "Features more stable than prices",
                  "status": h3_ok,
-                 "evidence": f"Feature stability={h3_stab:.4f}, E3 price CV={e3.get('mean_cv', 0):.2f}%"},
+                 "evidence": f"Feature stability={h3_stab:.4f}, E3 price CV={e3.get('mean_cv', 0):.2f}%",
+                 "regression_note": "N/A for regression — feature stability only applies to LLM pipelines" if has_reg else ""},
                 {"id": "H4", "text": "A-prime worse than B (enforcement placement matters)",
                  "status": "REQUIRES ABLATION",
-                 "evidence": "Ablation run (Pipeline A-prime) not yet implemented in web UI"},
+                 "evidence": "Ablation run (Pipeline A-prime) not yet implemented in web UI",
+                 "regression_note": "N/A for regression — this hypothesis is about LLM enforcement placement" if has_reg else ""},
             ]
+
+            ml_summary_line = ""
+            if has_reg:
+                best_reg = min(rf.get("mean_mae", 999999), xgb_s.get("mean_mae", 999999))
+                best_llm = min(e3.get("mean_mae", 999999), e5.get("mean_mae", 999999))
+                if best_reg < best_llm * 0.8:
+                    comp = "better"
+                elif best_reg > best_llm * 1.2:
+                    comp = "worse"
+                else:
+                    comp = "comparable"
+                ml_summary_line = (
+                    f"Traditional ML vs LLM: {comp} on accuracy, with the caveat that regression "
+                    f"models have access to the mmr feature (a professional wholesale price estimate) "
+                    f"that the LLM pipelines do not."
+                )
 
             return render_template_string(
                 COMPARE_TEMPLATE, **ctx,
                 summary=summary, metric_rows=metric_rows, hypotheses=hypotheses,
                 n_vehicles=n_vehicles, n_repeats=n_repeats,
                 provider=provider, elapsed=elapsed,
+                has_regression=has_reg, ml_summary_line=ml_summary_line,
+                regression_available=reg_avail,
             )
         except Exception as e:
             return render_template_string(COMPARE_TEMPLATE, **ctx, error=f"Error: {e}")

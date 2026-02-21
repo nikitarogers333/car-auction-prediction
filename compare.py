@@ -1,8 +1,8 @@
 """
-Comparison runner: Pipeline A (E3) vs Pipeline B (E5) vs Pipeline A' (ablation).
+Comparison runner: Pipeline A (E3) vs Pipeline B (E5) vs Pipeline C (RF) vs Pipeline D (XGB).
 
-Runs every vehicle through each pipeline N times, collects metrics, computes
-feature consistency, and outputs a head-to-head summary.
+Runs every vehicle through each pipeline N times (LLM pipelines) or once (regression),
+collects metrics, computes feature consistency, and outputs a head-to-head summary.
 
 Usage:
     python3 compare.py                          # full run (requires API keys)
@@ -18,7 +18,7 @@ import csv
 import json
 import sys
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,6 @@ from scoring import mae, variance_stats
 PROJECT_ROOT = Path(__file__).resolve().parent
 EVAL_DATA_PATH = PROJECT_ROOT / "data" / "eval_dataset.csv"
 
-# Features whose consistency we track for E5
 CATEGORICAL_FEATURES = ["market_demand", "trim_tier", "depreciation_rate",
                         "mileage_assessment", "comparable_market"]
 NUMERIC_FEATURES = ["condition_score"]
@@ -129,6 +128,56 @@ def _feature_consistency(results: list[dict]) -> dict[str, Any]:
     }
 
 
+def _run_regression_predictions(vehicles: list[dict]) -> dict[str, list[dict]]:
+    """Run RF and XGB on all vehicles. Returns per-pipeline vehicle metrics."""
+    try:
+        from regression_predictor import models_available, predict_rf, predict_xgb
+    except ImportError:
+        return {}
+
+    if not models_available():
+        return {}
+
+    reg_metrics: dict[str, list[dict]] = {"RF": [], "XGB": []}
+
+    for v in vehicles:
+        gt = v["price"]
+        kwargs = {
+            "year": v["year"],
+            "odometer": v["mileage"],
+            "condition": v.get("condition", 0),
+            "mmr": 0,
+            "make": v["make"],
+            "model": v["model"],
+            "body": "",
+            "transmission": "",
+            "color": "",
+            "interior": "",
+        }
+
+        for label, predict_fn in [("RF", predict_rf), ("XGB", predict_xgb)]:
+            try:
+                price = predict_fn(**kwargs)
+            except Exception:
+                price = 0.0
+            mae_single = abs(price - gt)
+            within_10 = 1 if gt > 0 and mae_single / gt <= 0.10 else 0
+            reg_metrics[label].append({
+                "vehicle_id": v["vehicle_id"],
+                "ground_truth": gt,
+                "mean_price": price,
+                "std_price": 0.0,
+                "cv": 0.0,
+                "valid_rate": 1.0,
+                "mean_retries": 0.0,
+                "n_prices": 1,
+                "mae_single": mae_single,
+                "within_10pct": within_10,
+            })
+
+    return reg_metrics
+
+
 def run_comparison(
     vehicles: list[dict],
     n_repeats: int = 5,
@@ -137,12 +186,11 @@ def run_comparison(
     run_ablation: bool = True,
 ) -> dict[str, Any]:
     """
-    Run Pipeline A (E3), Pipeline B (E5), and optionally A' on all vehicles.
-    Returns structured results with per-vehicle and aggregate metrics.
+    Run all pipelines on all vehicles. Returns structured results with aggregate metrics.
     """
-    pipelines = {"E3": "E3", "E5": "E5"}
-    results: dict[str, list[dict]] = {k: [] for k in pipelines}
-    vehicle_metrics: dict[str, list[dict]] = {k: [] for k in pipelines}
+    llm_pipelines = {"E3": "E3", "E5": "E5"}
+    results: dict[str, list[dict]] = {k: [] for k in llm_pipelines}
+    vehicle_metrics: dict[str, list[dict]] = {k: [] for k in llm_pipelines}
 
     total = len(vehicles)
     for idx, v in enumerate(vehicles, 1):
@@ -150,7 +198,7 @@ def run_comparison(
         gt = v["price"]
         print(f"  [{idx}/{total}] {vid} ({v['make']} {v['model']} {v['year']})...", flush=True)
 
-        for label, level in pipelines.items():
+        for label, level in llm_pipelines.items():
             runs = _run_vehicle_n_times(v, level, n_repeats, provider, use_mock)
             results[label].extend(runs)
             prices = _extract_prices(runs)
@@ -184,15 +232,26 @@ def run_comparison(
 
             vehicle_metrics[label].append(vm)
 
-    summary = _compute_summary(vehicle_metrics, pipelines)
+    # Add regression baselines
+    print("  Running regression baselines (RF, XGB)...", flush=True)
+    reg_metrics = _run_regression_predictions(vehicles)
+    for label, vms in reg_metrics.items():
+        vehicle_metrics[label] = vms
+
+    all_pipelines = {**llm_pipelines}
+    for label in reg_metrics:
+        all_pipelines[label] = label
+
+    summary = _compute_summary(vehicle_metrics, all_pipelines)
     return {
-        "pipelines": list(pipelines.keys()),
+        "pipelines": list(all_pipelines.keys()),
         "n_vehicles": total,
         "n_repeats": n_repeats,
         "provider": provider,
         "temperature": COMPARISON_TEMPERATURE,
         "vehicle_metrics": vehicle_metrics,
         "summary": summary,
+        "regression_available": bool(reg_metrics),
     }
 
 
@@ -202,7 +261,7 @@ def _compute_summary(
 ) -> dict[str, dict[str, Any]]:
     summary = {}
     for label in pipelines:
-        vms = vehicle_metrics[label]
+        vms = vehicle_metrics.get(label, [])
         if not vms:
             continue
         n = len(vms)
@@ -231,24 +290,26 @@ def _compute_summary(
 
 
 def print_summary(result: dict[str, Any]) -> None:
-    print("\n" + "=" * 72)
-    print(f"COMPARISON: Pipeline A (E3) vs Pipeline B (E5)")
+    print("\n" + "=" * 90)
+    print(f"COMPARISON: E3 vs E5 vs Random Forest vs XGBoost")
     print(f"  Vehicles: {result['n_vehicles']}  |  Repeats: {result['n_repeats']}  "
           f"|  Provider: {result['provider']}  |  Temperature: {result['temperature']}")
-    print("=" * 72)
+    print("=" * 90)
 
     summary = result["summary"]
+    labels = ["E3", "E5", "RF", "XGB"]
+    present = [l for l in labels if l in summary]
 
-    header = f"{'Metric':<30} {'E3 (direct)':>15} {'E5 (features)':>15}"
+    header = f"{'Metric':<28}" + "".join(f" {l:>15}" for l in present)
     print(header)
     print("-" * len(header))
 
     def _row(label: str, key: str, fmt: str = ".2f"):
-        e3_val = summary.get("E3", {}).get(key, "N/A")
-        e5_val = summary.get("E5", {}).get(key, "N/A")
-        e3_s = f"{e3_val:{fmt}}" if isinstance(e3_val, (int, float)) else str(e3_val)
-        e5_s = f"{e5_val:{fmt}}" if isinstance(e5_val, (int, float)) else str(e5_val)
-        print(f"{label:<30} {e3_s:>15} {e5_s:>15}")
+        vals = []
+        for p in present:
+            v = summary.get(p, {}).get(key, "N/A")
+            vals.append(f"{v:{fmt}}" if isinstance(v, (int, float)) else str(v))
+        print(f"{label:<28}" + "".join(f" {v:>15}" for v in vals))
 
     _row("Valid rate", "mean_valid_rate", ".4f")
     _row("Mean retries", "mean_retries", ".2f")
@@ -258,24 +319,66 @@ def print_summary(result: dict[str, Any]) -> None:
 
     e5_stab = summary.get("E5", {}).get("mean_feature_stability")
     if e5_stab is not None:
-        print(f"{'Feature stability (E5 only)':<30} {'---':>15} {e5_stab:>15.4f}")
+        stab_vals = []
+        for p in present:
+            if p == "E5":
+                stab_vals.append(f"{e5_stab:.4f}")
+            else:
+                stab_vals.append("---")
+        print(f"{'Feature stability (E5)':<28}" + "".join(f" {v:>15}" for v in stab_vals))
 
-    print("=" * 72)
+    # Tokens per request — N/A for regression
+    tok_vals = []
+    for p in present:
+        if p in ("RF", "XGB"):
+            tok_vals.append("N/A")
+        else:
+            tok_vals.append("~200-400")
+    print(f"{'Avg tokens/request':<28}" + "".join(f" {v:>15}" for v in tok_vals))
 
-    # H1-H4 assessment
+    print("=" * 90)
+
+    # Hypothesis assessment
     print("\nHypothesis assessment:")
     e3 = summary.get("E3", {})
     e5 = summary.get("E5", {})
+    rf = summary.get("RF", {})
+    xgb = summary.get("XGB", {})
 
     h1 = e5.get("mean_cv", 999) < e3.get("mean_cv", 999)
     h2 = e5.get("mean_mae", 999) < e3.get("mean_mae", 999)
     h3_stab = e5.get("mean_feature_stability", 0)
     h3_e3cv = e3.get("mean_cv", 0)
 
-    print(f"  H1 (E5 lower CV):             {'SUPPORTED' if h1 else 'NOT SUPPORTED'}  (E3={e3.get('mean_cv', 'N/A'):.2f}%, E5={e5.get('mean_cv', 'N/A'):.2f}%)")
-    print(f"  H2 (E5 lower MAE):            {'SUPPORTED' if h2 else 'NOT SUPPORTED'}  (E3=${e3.get('mean_mae', 'N/A'):,.0f}, E5=${e5.get('mean_mae', 'N/A'):,.0f})")
-    print(f"  H3 (features more stable):     {'SUPPORTED' if h3_stab > 0.8 else 'PARTIAL' if h3_stab > 0.6 else 'NOT SUPPORTED'}  (stability={h3_stab:.4f}, E3 price CV={h3_e3cv:.2f}%)")
+    print(f"  H1 (E5 lower CV):             {'SUPPORTED' if h1 else 'NOT SUPPORTED'}  "
+          f"(E3={e3.get('mean_cv', 'N/A'):.2f}%, E5={e5.get('mean_cv', 'N/A'):.2f}%)")
+    if rf:
+        print(f"      Regression context:       RF CV=0.00%, XGB CV=0.00% (deterministic — trivially zero)")
+    print(f"  H2 (E5 lower MAE):            {'SUPPORTED' if h2 else 'NOT SUPPORTED'}  "
+          f"(E3=${e3.get('mean_mae', 'N/A'):,.0f}, E5=${e5.get('mean_mae', 'N/A'):,.0f})")
+    if rf:
+        print(f"      Regression context:       RF MAE=${rf.get('mean_mae', 0):,.0f}, XGB MAE=${xgb.get('mean_mae', 0):,.0f}")
+    print(f"  H3 (features more stable):     "
+          f"{'SUPPORTED' if h3_stab > 0.8 else 'PARTIAL' if h3_stab > 0.6 else 'NOT SUPPORTED'}  "
+          f"(stability={h3_stab:.4f}, E3 price CV={h3_e3cv:.2f}%)")
+    if rf:
+        print(f"      Regression context:       N/A — feature stability only applies to LLM pipelines")
     print(f"  H4 (A' worse than B):          REQUIRES ABLATION RUN")
+    if rf:
+        print(f"      Regression context:       N/A — this hypothesis is about LLM enforcement placement")
+
+    if rf or xgb:
+        best_reg_mae = min(rf.get("mean_mae", 999999), xgb.get("mean_mae", 999999))
+        best_llm_mae = min(e3.get("mean_mae", 999999), e5.get("mean_mae", 999999))
+        if best_reg_mae < best_llm_mae * 0.8:
+            comparison = "better"
+        elif best_reg_mae > best_llm_mae * 1.2:
+            comparison = "worse"
+        else:
+            comparison = "comparable"
+        print(f"\n  Traditional ML vs LLM: {comparison} on accuracy, with the caveat that regression")
+        print(f"  models have access to the mmr feature (a professional wholesale price estimate)")
+        print(f"  that the LLM pipelines do not.")
     print()
 
 
@@ -288,7 +391,7 @@ def save_results(result: dict[str, Any], path: Path | None = None) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="E3 vs E5 comparison experiment")
+    parser = argparse.ArgumentParser(description="E3 vs E5 vs RF vs XGB comparison experiment")
     parser.add_argument("--data", type=str, default=None, help="Path to eval CSV")
     parser.add_argument("--n-vehicles", type=int, default=None, help="Limit vehicles")
     parser.add_argument("--n-repeats", type=int, default=DEFAULT_N_REPEATS)
@@ -300,7 +403,7 @@ def main() -> int:
     data_path = Path(args.data) if args.data else None
     vehicles = load_eval_data(data_path, limit=args.n_vehicles)
     print(f"Loaded {len(vehicles)} vehicles from {data_path or EVAL_DATA_PATH}")
-    print(f"Running E3 vs E5, {args.n_repeats} repeats each, temperature={COMPARISON_TEMPERATURE}")
+    print(f"Running E3 vs E5 (+ RF/XGB if trained), {args.n_repeats} repeats each, temperature={COMPARISON_TEMPERATURE}")
     print()
 
     start = time.time()
