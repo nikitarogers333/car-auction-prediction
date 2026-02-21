@@ -101,9 +101,9 @@ git push -u origin main
 - Check `.gitignore` isn't blocking important files
 
 **"Failed to fetch" or WORKER TIMEOUT when uploading training CSV:**
-- `railway.toml` and `Procfile` set Gunicorn `--timeout 300` for large/slow uploads
-- If it persists: Railway → your service → Settings → check **Custom Start Command**. If one is set, it can override `railway.toml`. Either remove it (so config-from-code is used) or ensure it includes `--timeout 300`
-- Verify: open deployment details; settings from `railway.toml` show a file icon on hover
+- `gunicorn.conf.py` sets `timeout = 300`. Procfile and `railway.toml` use it via `gunicorn -c gunicorn.conf.py app:app`
+- If it persists: Railway → your service → Settings → **Custom Start Command**. Remove it (so Procfile/railway.toml is used), or set it to exactly: `gunicorn -c gunicorn.conf.py app:app`
+- Fallback: Add **Variable** `GUNICORN_CMD_ARGS` = `--timeout 300` so Gunicorn gets the timeout even if the start command omits it
 
 ---
 
