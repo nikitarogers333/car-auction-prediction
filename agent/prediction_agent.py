@@ -11,12 +11,7 @@ import re
 from typing import Any
 
 from schemas import (
-    DEMAND_LEVELS,
-    DEPRECIATION_RATES,
-    MARKET_SEGMENTS,
-    MILEAGE_ASSESSMENTS,
     PREDICTION_METHODS,
-    TRIM_TIERS,
     validate_feature_output,
 )
 
@@ -35,27 +30,22 @@ Subgroup (use this): {subgroup}
 Allowed comparables: {allowed_comparables}
 Respond with exactly one JSON object."""
 
-# System prompt for E5 feature extraction (LLM outputs features, not price)
+# System prompt for E5 feature extraction (continuous 0-1 scores, not categories)
 FEATURE_SYSTEM_PROMPT = """You are a car auction assessment system. You do NOT predict a price. Instead, you assess the vehicle and output structured features as JSON.
 
 Output format (no other text):
-{{"condition_score": <1-10>, "market_demand": "<low|medium|high>", "trim_tier": "<base|mid|premium|performance>", "depreciation_rate": "<slow|normal|fast>", "mileage_assessment": "<low|average|high|very_high>", "comparable_market": "<budget|mainstream|luxury|performance>", "notes": "<max 100 chars>"}}
+{"condition_score": <1-10>, "market_demand": <0.0-1.0>, "trim_tier": <0.0-1.0>, "depreciation_rate": <0.0-1.0>, "mileage_assessment": <0.0-1.0>, "comparable_market": <0.0-1.0>, "notes": "<max 100 chars>"}
 
 Field definitions:
 - condition_score: 1 (salvage) to 10 (showroom), based on year, mileage, and typical condition for this model.
-- market_demand: current market demand for this specific model/year.
-- trim_tier: where this model sits in its manufacturer lineup.
-- depreciation_rate: how fast this model depreciates relative to peers.
-- mileage_assessment: how this mileage compares to typical for the age.
-- comparable_market: the market segment buyers compare this car to.
+- market_demand: 0.0 (no demand, car sits on lot) to 1.0 (exceptional demand, sells immediately). 0.5 = average demand.
+- trim_tier: 0.0 (base/entry-level trim) to 1.0 (top performance/flagship). 0.5 = mid-range trim.
+- depreciation_rate: 0.0 (holds value extremely well) to 1.0 (depreciates very rapidly). 0.5 = average depreciation.
+- mileage_assessment: 0.0 (very low mileage for age) to 1.0 (extremely high mileage for age). 0.5 = typical mileage.
+- comparable_market: 0.0 (budget/economy segment) to 1.0 (performance/enthusiast segment). 0.5 = mainstream.
 - notes: brief assessment rationale (max 100 chars).
 
-Allowed values:
-- trim_tier: {trim_tiers}
-- market_demand: {demand_levels}
-- depreciation_rate: {dep_rates}
-- mileage_assessment: {mileage_assess}
-- comparable_market: {market_segments}
+All numeric fields must be precise decimal values reflecting your actual assessment (e.g. 0.35, 0.72, 0.58). Do not round to 0.0, 0.5, or 1.0 unless truly at the extreme.
 
 Rules: Use only internal knowledge. Do NOT output a price. Output only the JSON object."""
 
@@ -278,34 +268,35 @@ class PredictionAgent:
         return out
 
     def _mock_features(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Deterministic mock returning continuous 0-1 scores."""
         model = (payload.get("model") or "").strip()
         year = int(payload.get("year") or 2020)
         mileage = int(payload.get("mileage") or 50000)
         age = max(0, 2025 - year)
-        tier = "performance" if model in ("M3", "M4", "M5") else "premium" if model in ("X5", "X3", "340i") else "mid"
-        demand = "high" if model in ("M3", "M4", "M5") else "medium"
-        dep = "slow" if tier == "performance" else "normal"
-        mi = "low" if mileage < 20000 else "average" if mileage < 50000 else "high" if mileage < 80000 else "very_high"
-        mkt = "performance" if tier == "performance" else "luxury" if tier == "premium" else "mainstream"
+
+        if model in ("M3", "M4", "M5"):
+            trim, demand, dep, mkt = 0.92, 0.82, 0.18, 0.88
+        elif model in ("X5", "X3", "340i"):
+            trim, demand, dep, mkt = 0.68, 0.55, 0.45, 0.65
+        else:
+            trim, demand, dep, mkt = 0.42, 0.48, 0.52, 0.38
+
+        typical_for_age = max(12000, age * 12000)
+        mi = max(0.0, min(1.0, mileage / (typical_for_age * 2)))
         cond = max(1.0, min(10.0, 8.0 - age * 0.5 - mileage / 30000))
+
         return {
-            "condition_score": round(cond, 1),
-            "market_demand": demand,
-            "trim_tier": tier,
-            "depreciation_rate": dep,
-            "mileage_assessment": mi,
-            "comparable_market": mkt,
+            "condition_score": round(cond, 2),
+            "market_demand": round(demand, 2),
+            "trim_tier": round(trim, 2),
+            "depreciation_rate": round(dep, 2),
+            "mileage_assessment": round(mi, 2),
+            "comparable_market": round(mkt, 2),
             "notes": f"Mock features for {payload.get('make', '')} {model} {year}",
         }
 
     def _build_feature_system_prompt(self) -> str:
-        return FEATURE_SYSTEM_PROMPT.format(
-            trim_tiers=", ".join(TRIM_TIERS),
-            demand_levels=", ".join(DEMAND_LEVELS),
-            dep_rates=", ".join(DEPRECIATION_RATES),
-            mileage_assess=", ".join(MILEAGE_ASSESSMENTS),
-            market_segments=", ".join(MARKET_SEGMENTS),
-        )
+        return FEATURE_SYSTEM_PROMPT
 
     def _build_feature_user_prompt(self, payload: dict[str, Any]) -> str:
         prompt = FEATURE_USER_PROMPT_TEMPLATE.format(
@@ -387,11 +378,11 @@ class PredictionAgent:
     def _feature_error_fallback(reason: str) -> dict[str, Any]:
         return {
             "condition_score": 5.0,
-            "market_demand": "medium",
-            "trim_tier": "mid",
-            "depreciation_rate": "normal",
-            "mileage_assessment": "average",
-            "comparable_market": "mainstream",
+            "market_demand": 0.5,
+            "trim_tier": 0.5,
+            "depreciation_rate": 0.5,
+            "mileage_assessment": 0.5,
+            "comparable_market": 0.5,
             "notes": reason[:100],
             "_validation_error": reason[:200],
         }

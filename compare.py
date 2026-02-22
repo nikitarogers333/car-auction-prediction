@@ -29,9 +29,8 @@ from scoring import mae, variance_stats
 PROJECT_ROOT = Path(__file__).resolve().parent
 EVAL_DATA_PATH = PROJECT_ROOT / "data" / "eval_dataset.csv"
 
-CATEGORICAL_FEATURES = ["market_demand", "trim_tier", "depreciation_rate",
-                        "mileage_assessment", "comparable_market"]
-NUMERIC_FEATURES = ["condition_score"]
+FEATURE_KEYS = ["condition_score", "market_demand", "trim_tier", "depreciation_rate",
+                "mileage_assessment", "comparable_market"]
 
 
 def load_eval_data(path: Path | None = None, limit: int | None = None) -> list[dict]:
@@ -90,7 +89,8 @@ def _extract_prices(results: list[dict]) -> list[float]:
 
 
 def _feature_consistency(results: list[dict]) -> dict[str, Any]:
-    """Measure how consistently the LLM assigns features across repeats."""
+    """Measure how consistently the LLM assigns features across repeats.
+    Auto-detects numeric (E5 continuous) vs categorical (A' strings) per field."""
     if not results:
         return {"overall_stability": 0.0}
 
@@ -99,31 +99,28 @@ def _feature_consistency(results: list[dict]) -> dict[str, Any]:
     if n < 2:
         return {"overall_stability": 1.0}
 
-    cat_scores = {}
-    for feat in CATEGORICAL_FEATURES:
+    scores = {}
+    for feat in FEATURE_KEYS:
         values = [f.get(feat) for f in features_per_run if f.get(feat) is not None]
         if not values:
-            cat_scores[feat] = 0.0
+            scores[feat] = 0.0
             continue
-        most_common_count = Counter(values).most_common(1)[0][1]
-        cat_scores[feat] = most_common_count / len(values)
 
-    num_scores = {}
-    for feat in NUMERIC_FEATURES:
-        values = [f.get(feat) for f in features_per_run
-                  if isinstance(f.get(feat), (int, float))]
-        if len(values) < 2:
-            num_scores[feat] = 1.0
-            continue
-        vs = variance_stats(values)
-        num_scores[feat] = max(0.0, 1.0 - vs["cv"] / 100.0)
+        if all(isinstance(v, (int, float)) for v in values):
+            if len(values) < 2:
+                scores[feat] = 1.0
+            else:
+                vs = variance_stats(values)
+                scores[feat] = max(0.0, 1.0 - vs["cv"] / 100.0)
+        else:
+            most_common_count = Counter(values).most_common(1)[0][1]
+            scores[feat] = most_common_count / len(values)
 
-    all_scores = list(cat_scores.values()) + list(num_scores.values())
+    all_scores = list(scores.values())
     overall = sum(all_scores) / len(all_scores) if all_scores else 0.0
 
     return {
-        "categorical": cat_scores,
-        "numeric": num_scores,
+        "per_feature": scores,
         "overall_stability": round(overall, 4),
     }
 

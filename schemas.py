@@ -75,19 +75,24 @@ FeatureOutputSchema = {
     ],
     "properties": {
         "condition_score": {"type": "number", "minimum": 1, "maximum": 10},
-        "market_demand": {"type": "string", "enum": list(DEMAND_LEVELS)},
-        "trim_tier": {"type": "string", "enum": list(TRIM_TIERS)},
-        "depreciation_rate": {"type": "string", "enum": list(DEPRECIATION_RATES)},
-        "mileage_assessment": {"type": "string", "enum": list(MILEAGE_ASSESSMENTS)},
-        "comparable_market": {"type": "string", "enum": list(MARKET_SEGMENTS)},
+        "market_demand": {"type": "number", "minimum": 0, "maximum": 1},
+        "trim_tier": {"type": "number", "minimum": 0, "maximum": 1},
+        "depreciation_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "mileage_assessment": {"type": "number", "minimum": 0, "maximum": 1},
+        "comparable_market": {"type": "number", "minimum": 0, "maximum": 1},
         "notes": {"type": "string", "maxLength": 100},
     },
     "additionalProperties": False,
 }
 
+CONTINUOUS_SCORE_FIELDS = (
+    "market_demand", "trim_tier", "depreciation_rate",
+    "mileage_assessment", "comparable_market",
+)
+
 
 def validate_feature_output(data: dict[str, Any]) -> tuple[bool, str]:
-    """Validate E5 feature-extraction output. Returns (valid, error_message)."""
+    """Validate E5 feature-extraction output (continuous 0-1 scores)."""
     if not isinstance(data, dict):
         return False, "output must be a JSON object"
     required = {"condition_score", "market_demand", "trim_tier", "depreciation_rate",
@@ -101,16 +106,10 @@ def validate_feature_output(data: dict[str, Any]) -> tuple[bool, str]:
     cs = data["condition_score"]
     if not isinstance(cs, (int, float)) or not (1 <= cs <= 10):
         return False, "condition_score must be a number in [1, 10]"
-    if data["market_demand"] not in DEMAND_LEVELS:
-        return False, f"market_demand must be one of {DEMAND_LEVELS}"
-    if data["trim_tier"] not in TRIM_TIERS:
-        return False, f"trim_tier must be one of {TRIM_TIERS}"
-    if data["depreciation_rate"] not in DEPRECIATION_RATES:
-        return False, f"depreciation_rate must be one of {DEPRECIATION_RATES}"
-    if data["mileage_assessment"] not in MILEAGE_ASSESSMENTS:
-        return False, f"mileage_assessment must be one of {MILEAGE_ASSESSMENTS}"
-    if data["comparable_market"] not in MARKET_SEGMENTS:
-        return False, f"comparable_market must be one of {MARKET_SEGMENTS}"
+    for field in CONTINUOUS_SCORE_FIELDS:
+        v = data[field]
+        if not isinstance(v, (int, float)) or not (0 <= v <= 1):
+            return False, f"{field} must be a number in [0, 1]"
     if not isinstance(data["notes"], str):
         return False, "notes must be a string"
     if len(data["notes"]) > 100:
