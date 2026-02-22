@@ -51,7 +51,7 @@ PROVIDERS = ("openai", "claude")
 # Enforcement ladder: how much we enforce before accepting an output
 # E0 = no enforcement (accept if parseable), E1 = schema only, E2 = schema + validation gate,
 # E3 = E2 + retry/repair loop, E4 = E3 + verifier, E5 = deterministic pricing from LLM features
-ENFORCEMENT_LEVELS = ("E0", "E1", "E2", "E3", "E4", "E5")
+ENFORCEMENT_LEVELS = ("E0", "E1", "E2", "E3", "E4", "E5", "APRIME")
 ENFORCEMENT_DESCRIPTIONS = {
     "E0": "No enforcement (accept if parseable)",
     "E1": "Schema only",
@@ -59,6 +59,7 @@ ENFORCEMENT_DESCRIPTIONS = {
     "E3": "Schema + validation + retry/repair",
     "E4": "E3 + verifier model",
     "E5": "LLM extracts features, code computes price",
+    "APRIME": "Free-form LLM + parser + same pricing formula (H4 ablation)",
 }
 MAX_VALIDATION_RETRIES = 3  # for E3, E4
 

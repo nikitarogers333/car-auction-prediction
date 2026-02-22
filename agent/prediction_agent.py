@@ -69,6 +69,28 @@ Respond with exactly one JSON object containing the features."""
 
 RETRY_APPEND = "\n\nPrevious attempt was rejected: {error}. Output corrected JSON only."
 
+# A-prime: free-form assessment prompt (NO schema, NO JSON, NO enforcement)
+FREEFORM_SYSTEM_PROMPT = """You are a car auction assessment expert. Write a natural paragraph describing this vehicle's condition and market positioning. Do NOT use JSON or any structured format.
+
+Cover these aspects in your own words:
+- The vehicle's overall physical condition (rate it on a 1 to 10 scale, where 1 is salvage and 10 is showroom)
+- How strong current market demand is for this specific model
+- Where this model sits in its manufacturer's lineup
+- How the depreciation rate compares to similar vehicles
+- Whether the mileage is typical, below, or above average for a vehicle of this age
+- What market segment buyers would compare this car to
+
+Write naturally in plain English. Use only your internal knowledge. Do not use bullet points, tables, or any structured format."""
+
+FREEFORM_USER_PROMPT_TEMPLATE = """Describe the condition and market positioning of this vehicle in plain English:
+Make: {make}
+Model: {model}
+Year: {year}
+Mileage: {mileage}
+Write a natural assessment paragraph."""
+
+FREEFORM_RETRY_APPEND = "\n\nYour previous response could not be interpreted. Please make sure to clearly mention: a condition rating out of 10, demand level, where the model sits in the lineup, depreciation speed, mileage assessment, and market segment."
+
 
 class PredictionAgent:
     """Outputs strict JSON matching PredictionOutput schema. Supports provider='openai' or 'claude'."""
@@ -373,6 +395,205 @@ class PredictionAgent:
             "notes": reason[:100],
             "_validation_error": reason[:200],
         }
+
+    # ----- A-prime: Free-form extraction (no schema enforcement) -----
+
+    def run_freeform_extraction(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """A-prime mode: LLM describes car in prose, parser extracts features."""
+        out = dict(payload)
+        if self._use_mock:
+            text = self._mock_freeform_text(out)
+        elif self._provider == "claude":
+            text = self._llm_freeform_claude(out)
+        else:
+            text = self._llm_freeform_openai(out)
+        features, success = self._parse_freeform_to_features(text)
+        features["_parsing_succeeded"] = success
+        out["extracted_features"] = features
+        out["_freeform_raw_text"] = text
+        return out
+
+    def _mock_freeform_text(self, payload: dict[str, Any]) -> str:
+        """Generate realistic prose that the parser must interpret."""
+        model = (payload.get("model") or "").strip()
+        year = int(payload.get("year") or 2020)
+        mileage = int(payload.get("mileage") or 50000)
+        make = payload.get("make") or "BMW"
+        age = max(0, 2025 - year)
+
+        tier = "performance" if model in ("M3", "M4", "M5") else "premium" if model in ("X5", "X3", "340i") else "mid"
+        demand = "high" if model in ("M3", "M4", "M5") else "medium"
+        dep = "slow" if tier == "performance" else "normal"
+        mi = "low" if mileage < 20000 else "average" if mileage < 50000 else "high" if mileage < 80000 else "very high"
+        mkt = "performance" if tier == "performance" else "luxury" if tier == "premium" else "mainstream"
+        cond = max(1.0, min(10.0, 8.0 - age * 0.5 - mileage / 30000))
+
+        demand_prose = {"low": "fairly limited", "medium": "moderate and steady", "high": "strong and robust"}
+        dep_prose = {"slow": "holds its value well and depreciates slowly", "normal": "depreciates at a normal rate", "fast": "depreciates rather quickly"}
+        tier_prose = {"base": "entry-level in the lineup", "mid": "mid-range in the lineup", "premium": "upper premium end of the lineup", "performance": "performance tier of the lineup"}
+        mkt_prose = {"budget": "budget market segment", "mainstream": "mainstream market segment", "luxury": "luxury market segment", "performance": "performance and enthusiast market segment"}
+        mi_prose = {"low": "low relative to its age", "average": "about average for its age", "high": "above average for its age", "very high": "very high for its age"}
+
+        return (
+            f"This {year} {make} {model} is in reasonable shape overall. "
+            f"I would rate its condition around {cond:.0f} out of 10. "
+            f"Market demand for this model is currently {demand_prose.get(demand, demand)}. "
+            f"In {make}'s range, this model sits at the {tier_prose.get(tier, tier)}. "
+            f"It {dep_prose.get(dep, 'depreciates normally')} compared to peers. "
+            f"With {mileage:,} miles, the mileage is {mi_prose.get(mi, mi)} for a {age}-year-old vehicle. "
+            f"Buyers shopping for this car typically compare it to vehicles in the {mkt_prose.get(mkt, mkt)}."
+        )
+
+    def _build_freeform_user_prompt(self, payload: dict[str, Any]) -> str:
+        prompt = FREEFORM_USER_PROMPT_TEMPLATE.format(
+            make=payload.get("make", ""),
+            model=payload.get("model", ""),
+            year=payload.get("year", 0),
+            mileage=payload.get("mileage") or "N/A",
+        )
+        retry_err = payload.get("_validation_error_from_previous_attempt")
+        if retry_err:
+            prompt += FREEFORM_RETRY_APPEND
+        return prompt
+
+    def _llm_freeform_openai(self, payload: dict[str, Any]) -> str:
+        try:
+            import openai
+        except ImportError:
+            return self._mock_freeform_text(payload)
+        client = openai.OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+        user = self._build_freeform_user_prompt(payload)
+        try:
+            resp = client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": FREEFORM_SYSTEM_PROMPT},
+                    {"role": "user", "content": user},
+                ],
+                temperature=self.temperature,
+                top_p=self.top_p,
+                seed=self.seed,
+            )
+            return (resp.choices[0].message.content or "").strip()
+        except Exception as e:
+            return f"Error: {e}"
+
+    def _llm_freeform_claude(self, payload: dict[str, Any]) -> str:
+        try:
+            from anthropic import Anthropic
+        except ImportError:
+            return self._mock_freeform_text(payload)
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            return self._mock_freeform_text(payload)
+        client = Anthropic(api_key=api_key)
+        user = self._build_freeform_user_prompt(payload)
+        try:
+            resp = client.messages.create(
+                model=self.model_name,
+                max_tokens=512,
+                system=FREEFORM_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user}],
+                temperature=self.temperature,
+            )
+            text = ""
+            for block in (resp.content or []):
+                if getattr(block, "type", None) == "text" and hasattr(block, "text"):
+                    text += block.text
+            return text.strip()
+        except Exception as e:
+            return f"Error: {e}"
+
+    @staticmethod
+    def _parse_freeform_to_features(text: str) -> tuple[dict[str, Any], bool]:
+        """Parse free-form prose into feature dict for pricing formula.
+        Returns (features_dict, parsing_succeeded).
+        """
+        lower = text.lower()
+        features: dict[str, Any] = {}
+        found_count = 0
+
+        cond = None
+        for pat in [
+            r'(\d+(?:\.\d+)?)\s*(?:out of|/)\s*10',
+            r'condition[^.]{0,40}?(\d+(?:\.\d+)?)',
+            r'(?:rate|score|grade)[^.]{0,30}?(\d+(?:\.\d+)?)',
+        ]:
+            m = re.search(pat, lower)
+            if m:
+                val = float(m.group(1))
+                if 1 <= val <= 10:
+                    cond = val
+                    break
+        features["condition_score"] = cond if cond is not None else 5.0
+        if cond is not None:
+            found_count += 1
+
+        val, ok = PredictionAgent._match_near(
+            lower, ["demand"],
+            {"low": "low", "weak": "low", "limited": "low",
+             "moderate": "medium", "medium": "medium", "average": "medium", "steady": "medium",
+             "high": "high", "strong": "high", "robust": "high", "significant": "high"},
+            "medium")
+        features["market_demand"] = val
+        found_count += ok
+
+        val, ok = PredictionAgent._match_near(
+            lower, ["tier", "trim", "lineup", "range", "positioning"],
+            {"base": "base", "entry": "base", "entry-level": "base", "basic": "base",
+             "mid": "mid", "middle": "mid", "mid-range": "mid", "midrange": "mid",
+             "premium": "premium", "upper": "premium", "upmarket": "premium",
+             "performance": "performance", "top-tier": "performance", "flagship": "performance",
+             "sport": "performance", "high-performance": "performance"},
+            "mid")
+        features["trim_tier"] = val
+        found_count += ok
+
+        val, ok = PredictionAgent._match_near(
+            lower, ["depreciat", "value retention", "resale", "holds"],
+            {"slow": "slow", "slowly": "slow", "gradual": "slow", "well": "slow", "retain": "slow",
+             "normal": "normal", "average": "normal", "moderate": "normal", "typical": "normal",
+             "fast": "fast", "rapid": "fast", "steep": "fast", "quickly": "fast"},
+            "normal")
+        features["depreciation_rate"] = val
+        found_count += ok
+
+        val, ok = PredictionAgent._match_near(
+            lower, ["mileage", "miles", "odometer"],
+            {"very high": "very_high", "extremely high": "very_high", "excessive": "very_high",
+             "high": "high", "above average": "high", "elevated": "high",
+             "low": "low", "below": "low", "minimal": "low", "light": "low",
+             "average": "average", "typical": "average", "moderate": "average", "normal": "average"},
+            "average")
+        features["mileage_assessment"] = val
+        found_count += ok
+
+        val, ok = PredictionAgent._match_near(
+            lower, ["market", "segment", "compet", "compar", "category", "class", "shopping"],
+            {"budget": "budget", "economy": "budget", "affordable": "budget",
+             "mainstream": "mainstream", "mid-market": "mainstream", "mass market": "mainstream",
+             "luxury": "luxury", "upscale": "luxury",
+             "performance": "performance", "enthusiast": "performance", "sport": "performance"},
+            "mainstream")
+        features["comparable_market"] = val
+        found_count += ok
+
+        features["notes"] = "Parsed from free-form LLM text"
+        success = found_count >= 3
+
+        return features, success
+
+    @staticmethod
+    def _match_near(text: str, context_words: list[str], value_map: dict[str, str], default: str) -> tuple[str, bool]:
+        """Find a value from value_map in sentences containing context words.
+        Returns (matched_value, was_found)."""
+        sentences = re.split(r'[.!?\n]', text)
+        relevant = [s for s in sentences if any(cw in s for cw in context_words)]
+        search = " ".join(relevant) if relevant else text
+        for key in sorted(value_map.keys(), key=len, reverse=True):
+            if key in search:
+                return value_map[key], True
+        return default, False
 
     def _extract_json(self, text: str) -> dict[str, Any] | None:
         """Extract first JSON object from text."""

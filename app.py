@@ -495,6 +495,7 @@ COMPARE_TEMPLATE = """
         th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
         th { background: #e9ecef; font-weight: 600; }
         .col-header-llm { background: #e8f0fe; }
+        .col-header-ablation { background: #f0e8fe; }
         .col-header-ml { background: #fef3e2; }
         .supported { color: var(--valid); font-weight: 700; }
         .not-supported { color: var(--invalid); font-weight: 700; }
@@ -665,8 +666,10 @@ COMPARE_TEMPLATE = """
             }
 
             var hasReg = data.has_regression;
+            var hasAprime = data.has_aprime !== false;
             var rows = data.metric_rows || [];
-            var ths = '<tr><th>Metric</th><th class="col-header-llm">A: E3<br><small>LLM predicts price</small></th><th class="col-header-ml">B: E5<br><small>LLM extracts features</small></th>';
+            var ths = '<tr><th>Metric</th><th class="col-header-llm">A: E3<br><small>LLM predicts price</small></th><th class="col-header-ml">B: E5<br><small>LLM features + formula</small></th>';
+            if (hasAprime) ths += '<th class="col-header-ablation">A\': Ablation<br><small>Free-form + formula</small></th>';
             if (hasReg) ths += '<th class="col-header-ml">C: Random Forest<br><small>Traditional ML</small></th><th class="col-header-ml">D: XGBoost<br><small>Traditional ML</small></th>';
             ths += '</tr>';
 
@@ -676,6 +679,9 @@ COMPARE_TEMPLATE = """
                 var tr = '<tr class="metric-row"><td>' + escapeHtml(r.label) + '</td>';
                 tr += '<td class="' + (r.e3_wins ? 'winner' : '') + '">' + escapeHtml(r.e3_val) + '</td>';
                 tr += '<td class="' + (r.e5_wins ? 'winner' : '') + '">' + escapeHtml(r.e5_val) + '</td>';
+                if (hasAprime) {
+                    tr += '<td class="' + (r.aprime_wins ? 'winner' : '') + '">' + escapeHtml(r.aprime_val || '---') + '</td>';
+                }
                 if (hasReg) {
                     tr += '<td class="' + (r.rf_wins ? 'winner' : '') + '">' + escapeHtml(r.rf_val) + '</td>';
                     tr += '<td class="' + (r.xgb_wins ? 'winner' : '') + '">' + escapeHtml(r.xgb_val) + '</td>';
@@ -690,8 +696,8 @@ COMPARE_TEMPLATE = """
 
             html += '<div class="step" style="margin-top:16px;"><div class="step-title">Hypothesis Assessment</div>';
             var hyps = data.hypotheses || [];
-            var bg = { 'SUPPORTED': '#d1e7dd', 'NOT SUPPORTED': '#f8d7da', 'PARTIAL': '#fff3cd', 'REQUIRES ABLATION': '#fff3cd' };
-            var cls = { 'SUPPORTED': 'supported', 'NOT SUPPORTED': 'not-supported', 'PARTIAL': 'partial', 'REQUIRES ABLATION': 'partial' };
+            var bg = { 'SUPPORTED': '#d1e7dd', 'NOT SUPPORTED': '#f8d7da', 'PARTIAL': '#fff3cd', 'REQUIRES ABLATION': '#fff3cd', 'INCONCLUSIVE': '#fff3cd' };
+            var cls = { 'SUPPORTED': 'supported', 'NOT SUPPORTED': 'not-supported', 'PARTIAL': 'partial', 'REQUIRES ABLATION': 'partial', 'INCONCLUSIVE': 'partial' };
             for (var j = 0; j < hyps.length; j++) {
                 var h = hyps[j];
                 html += '<div class="hypothesis" style="background:' + (bg[h.status] || '#fff') + ';">';
@@ -788,19 +794,22 @@ def _build_compare_result_json(provider, n_vehicles, n_repeats, use_mock, result
     summary = result["summary"]
     e3 = summary.get("E3", {})
     e5 = summary.get("E5", {})
+    aprime_s = summary.get("A'", {})
     rf = summary.get("RF", {})
     xgb_s = summary.get("XGB", {})
     has_reg = bool(rf and rf.get("n_vehicles")) or bool(xgb_s and xgb_s.get("n_vehicles"))
+    has_aprime = bool(aprime_s and aprime_s.get("n_vehicles"))
 
     metric_rows = []
+    all_cols = [("e3", e3), ("e5", e5), ("aprime", aprime_s), ("rf", rf), ("xgb", xgb_s)]
 
     def _add(label, key, fmt=".2f", lower_better=True, na_for_reg=False):
         vals = {}
-        for lbl, src in [("e3", e3), ("e5", e5), ("rf", rf), ("xgb", xgb_s)]:
+        for lbl, src in all_cols:
             vals[lbl] = src.get(key, "N/A") if src else "N/A"
         all_nums = {k: v for k, v in vals.items() if isinstance(v, (int, float))}
         if na_for_reg:
-            compare_nums = {k: v for k, v in all_nums.items() if k in ("e3", "e5")}
+            compare_nums = {k: v for k, v in all_nums.items() if k in ("e3", "e5", "aprime")}
         else:
             compare_nums = all_nums
         if lower_better and compare_nums:
@@ -810,7 +819,7 @@ def _build_compare_result_json(provider, n_vehicles, n_repeats, use_mock, result
         else:
             best = None
         row = {"label": label}
-        for lbl in ["e3", "e5", "rf", "xgb"]:
+        for lbl in ["e3", "e5", "aprime", "rf", "xgb"]:
             v = vals[lbl]
             if na_for_reg and lbl in ("rf", "xgb"):
                 row[f"{lbl}_val"], row[f"{lbl}_wins"] = "N/A", False
@@ -827,12 +836,15 @@ def _build_compare_result_json(provider, n_vehicles, n_repeats, use_mock, result
     _add("Price CV (%)", "mean_cv", ".2f", lower_better=True)
     _add("MAE ($)", "mean_mae", ".0f", lower_better=True)
     _add("Within 10% of actual (%)", "pct_within_10", ".1f", lower_better=False)
-    stab = e5.get("mean_feature_stability")
-    if stab is not None:
+
+    e5_stab = e5.get("mean_feature_stability")
+    ap_stab = aprime_s.get("mean_feature_stability")
+    if e5_stab is not None or ap_stab is not None:
         metric_rows.append({
-            "label": "Feature stability (E5 only)",
+            "label": "Feature stability",
             "e3_val": "---", "e3_wins": False,
-            "e5_val": _safe_fmt(stab, ".4f"), "e5_wins": False,
+            "e5_val": _safe_fmt(e5_stab, ".4f") if e5_stab is not None else "---", "e5_wins": False,
+            "aprime_val": _safe_fmt(ap_stab, ".4f") if ap_stab is not None else "---", "aprime_wins": False,
             "rf_val": "---", "rf_wins": False,
             "xgb_val": "---", "xgb_wins": False,
         })
@@ -840,6 +852,7 @@ def _build_compare_result_json(provider, n_vehicles, n_repeats, use_mock, result
         "label": "Avg tokens/request",
         "e3_val": "~200-400", "e3_wins": False,
         "e5_val": "~200-400", "e5_wins": False,
+        "aprime_val": "~200-400", "aprime_wins": False,
         "rf_val": "N/A", "rf_wins": False,
         "xgb_val": "N/A", "xgb_wins": False,
     })
@@ -853,6 +866,20 @@ def _build_compare_result_json(provider, n_vehicles, n_repeats, use_mock, result
     if has_reg:
         h2_reg = f"RF MAE={_safe_fmt(rf.get('mean_mae'), ',.0f')}, XGB MAE={_safe_fmt(xgb_s.get('mean_mae'), ',.0f')} (note: regression has mmr feature)"
 
+    e5_mae = e5.get("mean_mae")
+    ap_mae = aprime_s.get("mean_mae")
+    if isinstance(e5_mae, (int, float)) and isinstance(ap_mae, (int, float)) and has_aprime:
+        h4_supported = e5_mae < ap_mae
+        h4_status = "SUPPORTED" if h4_supported else "NOT SUPPORTED"
+        h4_evidence = f"E5 MAE=${_safe_fmt(e5_mae, ',.0f')}, A' MAE=${_safe_fmt(ap_mae, ',.0f')}"
+        if h4_supported:
+            h4_evidence += " — enforcement improves accuracy"
+        else:
+            h4_evidence += " — formula drives the improvement, not enforcement"
+    else:
+        h4_status = "INCONCLUSIVE"
+        h4_evidence = "A' data not available"
+
     hypotheses = [
         {"id": "H1", "text": "E5 lower CV than E3", "status": "SUPPORTED" if h1_ok else "NOT SUPPORTED",
          "evidence": f"E3 CV={_safe_fmt(e3.get('mean_cv'), '.2f')}%, E5 CV={_safe_fmt(e5.get('mean_cv'), '.2f')}%", "regression_note": h1_reg},
@@ -861,8 +888,8 @@ def _build_compare_result_json(provider, n_vehicles, n_repeats, use_mock, result
         {"id": "H3", "text": "Features more stable than prices", "status": h3_ok,
          "evidence": f"Feature stability={_safe_fmt(h3_stab, '.4f')}, E3 price CV={_safe_fmt(e3.get('mean_cv'), '.2f')}%",
          "regression_note": "N/A for regression" if has_reg else ""},
-        {"id": "H4", "text": "A-prime worse than B (enforcement placement matters)", "status": "REQUIRES ABLATION",
-         "evidence": "Ablation run not yet implemented", "regression_note": "N/A for regression" if has_reg else ""},
+        {"id": "H4", "text": "A' worse than E5 (enforcement placement matters)", "status": h4_status,
+         "evidence": h4_evidence, "regression_note": "N/A for regression" if has_reg else ""},
     ]
 
     ml_summary_line = ""
@@ -884,6 +911,7 @@ def _build_compare_result_json(provider, n_vehicles, n_repeats, use_mock, result
         "temperature": COMPARISON_TEMPERATURE,
         "elapsed": elapsed,
         "has_regression": has_reg,
+        "has_aprime": has_aprime,
         "metric_rows": metric_rows,
         "hypotheses": hypotheses,
         "ml_summary_line": ml_summary_line,

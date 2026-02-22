@@ -188,7 +188,7 @@ def run_comparison(
     """
     Run all pipelines on all vehicles. Returns structured results with aggregate metrics.
     """
-    llm_pipelines = {"E3": "E3", "E5": "E5"}
+    llm_pipelines = {"E3": "E3", "E5": "E5", "A'": "APRIME"}
     results: dict[str, list[dict]] = {k: [] for k in llm_pipelines}
     vehicle_metrics: dict[str, list[dict]] = {k: [] for k in llm_pipelines}
 
@@ -218,7 +218,7 @@ def run_comparison(
                 "n_prices": len(prices),
             }
 
-            if level == "E5":
+            if level in ("E5", "APRIME"):
                 fc = _feature_consistency(runs)
                 vm["feature_stability"] = fc["overall_stability"]
                 vm["feature_detail"] = fc
@@ -281,7 +281,7 @@ def _compute_summary(
             "mean_retries": round(sum(retries) / n, 2) if n else 0,
         }
 
-        if label == "E5":
+        if label in ("E5", "A'"):
             stabs = [v.get("feature_stability", 0) for v in vms]
             s["mean_feature_stability"] = round(sum(stabs) / len(stabs), 4) if stabs else 0
 
@@ -290,14 +290,14 @@ def _compute_summary(
 
 
 def print_summary(result: dict[str, Any]) -> None:
-    print("\n" + "=" * 90)
-    print(f"COMPARISON: E3 vs E5 vs Random Forest vs XGBoost")
+    print("\n" + "=" * 100)
+    print(f"COMPARISON: E3 vs E5 vs A' (ablation) vs Random Forest vs XGBoost")
     print(f"  Vehicles: {result['n_vehicles']}  |  Repeats: {result['n_repeats']}  "
           f"|  Provider: {result['provider']}  |  Temperature: {result['temperature']}")
-    print("=" * 90)
+    print("=" * 100)
 
     summary = result["summary"]
-    labels = ["E3", "E5", "RF", "XGB"]
+    labels = ["E3", "E5", "A'", "RF", "XGB"]
     present = [l for l in labels if l in summary]
 
     header = f"{'Metric':<28}" + "".join(f" {l:>15}" for l in present)
@@ -317,17 +317,14 @@ def print_summary(result: dict[str, Any]) -> None:
     _row("MAE ($)", "mean_mae", ".0f")
     _row("Within 10% of actual (%)", "pct_within_10", ".1f")
 
-    e5_stab = summary.get("E5", {}).get("mean_feature_stability")
-    if e5_stab is not None:
+    stab_labels = [p for p in present if p in ("E5", "A'")]
+    if stab_labels:
         stab_vals = []
         for p in present:
-            if p == "E5":
-                stab_vals.append(f"{e5_stab:.4f}")
-            else:
-                stab_vals.append("---")
-        print(f"{'Feature stability (E5)':<28}" + "".join(f" {v:>15}" for v in stab_vals))
+            s = summary.get(p, {}).get("mean_feature_stability")
+            stab_vals.append(f"{s:.4f}" if s is not None else "---")
+        print(f"{'Feature stability':<28}" + "".join(f" {v:>15}" for v in stab_vals))
 
-    # Tokens per request — N/A for regression
     tok_vals = []
     for p in present:
         if p in ("RF", "XGB"):
@@ -336,12 +333,13 @@ def print_summary(result: dict[str, Any]) -> None:
             tok_vals.append("~200-400")
     print(f"{'Avg tokens/request':<28}" + "".join(f" {v:>15}" for v in tok_vals))
 
-    print("=" * 90)
+    print("=" * 100)
 
     # Hypothesis assessment
     print("\nHypothesis assessment:")
     e3 = summary.get("E3", {})
     e5 = summary.get("E5", {})
+    aprime = summary.get("A'", {})
     rf = summary.get("RF", {})
     xgb = summary.get("XGB", {})
 
@@ -349,6 +347,16 @@ def print_summary(result: dict[str, Any]) -> None:
     h2 = e5.get("mean_mae", 999) < e3.get("mean_mae", 999)
     h3_stab = e5.get("mean_feature_stability", 0)
     h3_e3cv = e3.get("mean_cv", 0)
+
+    e5_mae = e5.get("mean_mae")
+    ap_mae = aprime.get("mean_mae")
+    if isinstance(e5_mae, (int, float)) and isinstance(ap_mae, (int, float)):
+        h4_ok = e5_mae < ap_mae
+        h4_status = "SUPPORTED" if h4_ok else "NOT SUPPORTED"
+        h4_evidence = f"E5 MAE=${e5_mae:,.0f}, A' MAE=${ap_mae:,.0f}"
+    else:
+        h4_status = "INCONCLUSIVE"
+        h4_evidence = "Missing data for comparison"
 
     print(f"  H1 (E5 lower CV):             {'SUPPORTED' if h1 else 'NOT SUPPORTED'}  "
           f"(E3={e3.get('mean_cv', 'N/A'):.2f}%, E5={e5.get('mean_cv', 'N/A'):.2f}%)")
@@ -363,7 +371,11 @@ def print_summary(result: dict[str, Any]) -> None:
           f"(stability={h3_stab:.4f}, E3 price CV={h3_e3cv:.2f}%)")
     if rf:
         print(f"      Regression context:       N/A — feature stability only applies to LLM pipelines")
-    print(f"  H4 (A' worse than B):          REQUIRES ABLATION RUN")
+    print(f"  H4 (A' worse → enforcement matters): {h4_status}  ({h4_evidence})")
+    if h4_status == "SUPPORTED":
+        print(f"      Interpretation:           Schema enforcement improves accuracy beyond what the formula alone provides")
+    elif h4_status == "NOT SUPPORTED":
+        print(f"      Interpretation:           The pricing formula drives the improvement; enforcement placement is secondary")
     if rf:
         print(f"      Regression context:       N/A — this hypothesis is about LLM enforcement placement")
 

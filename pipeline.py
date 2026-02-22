@@ -91,6 +91,10 @@ def run_pipeline(
         if decision == HookDecision.MODIFY and modified is not None:
             payload = modified
 
+    # --- A-prime path: free-form LLM + parser + same pricing formula ---
+    if level == "APRIME":
+        return _run_aprime(payload, pred_agent, stop_hook)
+
     # --- E5 path: feature extraction + deterministic pricing ---
     if level == "E5":
         return _run_e5(payload, pred_agent, stop_hook)
@@ -226,6 +230,62 @@ def _run_e5(
 
         retry_count += 1
         payload["_validation_error_from_previous_attempt"] = feat_err or "feature validation failed"
+
+
+def _run_aprime(
+    payload: dict[str, Any],
+    pred_agent: PredictionAgent,
+    stop_hook: StopHook | None,
+) -> dict[str, Any]:
+    """A-prime (H4 ablation): free-form LLM text → parse features → pricing formula.
+    Same formula as E5 but NO schema enforcement on the LLM output.
+    Retries once if parsing fails (spec: retry once).
+    """
+    max_retries = 1
+    retry_count = 0
+
+    while True:
+        payload.pop("_validation_error_from_previous_attempt", None)
+        payload = pred_agent.run_freeform_extraction(payload)
+        features = payload.get("extracted_features") or {}
+        parsing_ok = features.pop("_parsing_succeeded", False)
+
+        if parsing_ok:
+            year = int(payload.get("year") or 2020)
+            mileage = int(payload.get("mileage") or 50000)
+            price = compute_price_from_features(features, year, mileage)
+            payload["prediction"] = {
+                "predicted_price": price,
+                "confidence": 0.75,
+                "method": "feature_extraction",
+                "subgroup_detected": payload.get("subgroup", "generic"),
+                "notes": "A' free-form extraction + deterministic formula",
+            }
+            payload["valid"] = True
+            payload["violation_reason"] = None
+            payload["retry_count"] = retry_count
+            if stop_hook:
+                decision, _ = stop_hook.run(payload)
+                if decision == HookDecision.DENY:
+                    payload["valid"] = False
+                    payload["violation_reason"] = "StopHook denied"
+            return payload
+
+        if retry_count >= max_retries:
+            payload["prediction"] = {
+                "predicted_price": 0,
+                "confidence": 0,
+                "method": "feature_extraction",
+                "subgroup_detected": payload.get("subgroup", "generic"),
+                "notes": f"A' parsing failed after {retry_count} retries",
+            }
+            payload["valid"] = False
+            payload["violation_reason"] = "A' free-form parsing failed"
+            payload["retry_count"] = retry_count
+            return payload
+
+        retry_count += 1
+        payload["_validation_error_from_previous_attempt"] = "Free-form parsing could not extract features"
 
 
 def run_consistency_check(
