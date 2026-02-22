@@ -600,32 +600,16 @@ COMPARE_TEMPLATE = """
         const file = fileInput.files[0];
         const formData = new FormData();
         formData.append('training_file', file);
-        // #region agent log
-        console.log('[DEBUG-UPLOAD-FE] File:', file.name, 'size:', file.size, 'type:', file.type);
         statusDiv.innerHTML = '<div class="info"><span class="spinner"></span> Uploading ' + escapeHtml(file.name) + ' (' + (file.size/1024/1024).toFixed(1) + ' MB)...</div>';
-        // #endregion
         try {
-            // #region agent log
-            console.log('[DEBUG-UPLOAD-FE] H-E: Sending fetch POST...');
-            const fetchStart = Date.now();
-            // #endregion
             const resp = await fetch('/upload-training-data', { method: 'POST', body: formData });
-            // #region agent log
-            console.log('[DEBUG-UPLOAD-FE] H-E: Got response. status:', resp.status, 'ok:', resp.ok, 'elapsed:', (Date.now()-fetchStart)+'ms');
-            // #endregion
             if (!resp.ok) {
-                // #region agent log
                 const errText = await resp.text();
-                console.log('[DEBUG-UPLOAD-FE] H-E: Non-OK response body:', errText);
-                // #endregion
                 statusDiv.innerHTML = '<div class="error">Server error (HTTP ' + resp.status + '): ' + escapeHtml(errText.substring(0, 200)) + '</div>';
                 btn.disabled = false;
                 return;
             }
             const data = await resp.json();
-            // #region agent log
-            console.log('[DEBUG-UPLOAD-FE] H-E: Parsed JSON:', JSON.stringify(data));
-            // #endregion
             if (data.success && data.status === 'saved') {
                 statusDiv.innerHTML = '<div class="info"><span class="spinner"></span> Training in background (~3 min). Polling every 10s...</div>';
                 const pollInterval = setInterval(async function() {
@@ -651,9 +635,6 @@ COMPARE_TEMPLATE = """
                 btn.disabled = false;
             }
         } catch (err) {
-            // #region agent log
-            console.log('[DEBUG-UPLOAD-FE] H-E CATCH: err.name:', err.name, 'err.message:', err.message, 'err:', err);
-            // #endregion
             statusDiv.innerHTML = '<div class="error">Request failed: ' + escapeHtml(err.name + ': ' + err.message) + '</div>';
             btn.disabled = false;
         }
@@ -756,43 +737,21 @@ def _run_training_background(dest: Path) -> None:
 @app.route("/upload-training-data", methods=["POST"])
 def upload_training_data():
     """Save uploaded CSV/Excel immediately; start training in background to avoid timeout."""
-    # #region agent log
-    import time as _t; _upload_start = _t.time()
-    print(f"[DEBUG-UPLOAD] Handler entered. content_length={request.content_length}, content_type={request.content_type}", flush=True)
-    # #endregion
     if "training_file" not in request.files:
-        # #region agent log
-        print("[DEBUG-UPLOAD] H-A: training_file NOT in request.files", flush=True)
-        # #endregion
         return jsonify({"success": False, "error": "No file uploaded"})
     f = request.files["training_file"]
-    # #region agent log
-    print(f"[DEBUG-UPLOAD] H-A confirmed: request reached Flask. filename={f.filename}, elapsed={_t.time()-_upload_start:.2f}s", flush=True)
-    # #endregion
     if not f.filename:
         return jsonify({"success": False, "error": "No file selected"})
     suffix = Path(f.filename).suffix.lower()
     if suffix not in (".csv", ".xlsx", ".xls"):
         return jsonify({"success": False, "error": "File must be .csv, .xlsx, or .xls"})
     dest = REGRESSION_DATA_DIR / ("car_prices" + suffix)
-    # #region agent log
-    print(f"[DEBUG-UPLOAD] H-B: Saving to {dest}. REGRESSION_DATA_DIR={REGRESSION_DATA_DIR}, exists={REGRESSION_DATA_DIR.exists()}", flush=True)
-    # #endregion
     try:
         REGRESSION_DATA_DIR.mkdir(parents=True, exist_ok=True)
         f.save(str(dest))
-        # #region agent log
-        print(f"[DEBUG-UPLOAD] H-B confirmed: File saved. size={dest.stat().st_size}, elapsed={_t.time()-_upload_start:.2f}s", flush=True)
-        # #endregion
     except Exception as e:
-        # #region agent log
-        print(f"[DEBUG-UPLOAD] H-B FAILED: save error={e}", flush=True)
-        # #endregion
         return jsonify({"success": False, "error": f"Failed to save file: {e}"})
     threading.Thread(target=_run_training_background, args=(dest,), daemon=True).start()
-    # #region agent log
-    print(f"[DEBUG-UPLOAD] H-C: Returning success JSON. total_elapsed={_t.time()-_upload_start:.2f}s", flush=True)
-    # #endregion
     return jsonify({"success": True, "status": "saved", "message": "File saved. Training started in background. Poll for completion."})
 
 

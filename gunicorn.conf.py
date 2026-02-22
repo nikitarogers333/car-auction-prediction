@@ -5,8 +5,3 @@ import os
 bind = f"0.0.0.0:{os.environ.get('PORT', '5000')}"
 workers = 2
 timeout = 300
-
-# #region agent log
-def on_starting(server):
-    print(f"[DEBUG-GUNICORN] Config loaded. timeout={timeout}, workers={workers}, bind={bind}", flush=True)
-# #endregion
