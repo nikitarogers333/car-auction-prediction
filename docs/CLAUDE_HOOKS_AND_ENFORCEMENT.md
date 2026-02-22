@@ -54,6 +54,8 @@ So: **structured output + deterministic settings + verifier (no accept on failur
 
 ---
 
+**Enforcement ladder (E0–E4):** E0 = accept if parseable; E1 = schema only; E2 = schema + validation gate; E3 = E2 + retry/repair; E4 = E3 + verifier. See `config.ENFORCEMENT_LEVELS` and `pipeline.run_pipeline(..., enforcement_level=...)`. Metrics: valid rate, retries per request, CV.
+
 ## Using the Hooks in This Repo
 
 - **Defined in:** `hooks.py` (PrePredictionHook, PostPredictionHook, StopHook, HookDecision).
