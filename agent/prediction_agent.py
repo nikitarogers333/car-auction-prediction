@@ -372,7 +372,21 @@ class PredictionAgent:
         valid, err = validate_feature_output(parsed)
         if not valid:
             parsed["_validation_error"] = err
+        self._snap_features(parsed)
         return parsed
+
+    @staticmethod
+    def _snap_features(parsed: dict[str, Any]) -> None:
+        """Round continuous scores to 0.1 grid and condition to integer,
+        matching the formula's snap grid for consistency."""
+        from schemas import CONTINUOUS_SCORE_FIELDS
+        for field in CONTINUOUS_SCORE_FIELDS:
+            v = parsed.get(field)
+            if isinstance(v, (int, float)):
+                parsed[field] = round(v * 10) / 10
+        cs = parsed.get("condition_score")
+        if isinstance(cs, (int, float)):
+            parsed["condition_score"] = round(cs)
 
     @staticmethod
     def _feature_error_fallback(reason: str) -> dict[str, Any]:
