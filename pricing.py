@@ -74,14 +74,21 @@ def compute_price_from_features(
     return _compute_categorical(features, year, mileage)
 
 
+def _snap(v: float, step: float = 0.05) -> float:
+    """Snap to nearest grid point. Eliminates micro-variation between runs
+    while keeping 21 distinct levels (vs 3-4 for old categories)."""
+    return round(v / step) * step
+
+
 def _compute_continuous(features: dict[str, Any], year: int, mileage: int) -> float:
-    """E5 path: all scoring fields are 0-1 floats, formula interpolates smoothly."""
-    demand = max(0.0, min(1.0, float(features.get("market_demand", 0.5))))
-    trim = max(0.0, min(1.0, float(features.get("trim_tier", 0.5))))
-    market = max(0.0, min(1.0, float(features.get("comparable_market", 0.5))))
-    dep = max(0.0, min(1.0, float(features.get("depreciation_rate", 0.5))))
-    mi = max(0.0, min(1.0, float(features.get("mileage_assessment", 0.5))))
-    condition_score = float(features.get("condition_score", 5.0))
+    """E5 path: all scoring fields are 0-1 floats, snapped to 0.05 grid,
+    formula interpolates smoothly between grid points."""
+    demand = _snap(max(0.0, min(1.0, float(features.get("market_demand", 0.5)))))
+    trim = _snap(max(0.0, min(1.0, float(features.get("trim_tier", 0.5)))))
+    market = _snap(max(0.0, min(1.0, float(features.get("comparable_market", 0.5)))))
+    dep = _snap(max(0.0, min(1.0, float(features.get("depreciation_rate", 0.5)))))
+    mi = _snap(max(0.0, min(1.0, float(features.get("mileage_assessment", 0.5)))))
+    condition_score = round(float(features.get("condition_score", 5.0)) * 2) / 2  # snap to 0.5
 
     base = _interpolate_base_price(market, trim)
 
