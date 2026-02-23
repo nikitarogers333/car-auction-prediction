@@ -88,9 +88,18 @@ def _extract_prices(results: list[dict]) -> list[float]:
     return prices
 
 
+def _snap_for_stability(v: float, feat: str) -> float:
+    """Apply same snapping grid used by the pricing formula so stability
+    measures what the formula actually sees, not raw LLM precision."""
+    if feat == "condition_score":
+        return round(v)
+    return round(v / 0.10) * 0.10
+
+
 def _feature_consistency(results: list[dict]) -> dict[str, Any]:
     """Measure how consistently the LLM assigns features across repeats.
-    Auto-detects numeric (E5 continuous) vs categorical (A' strings) per field."""
+    Numeric fields are snapped to the same grid the pricing formula uses
+    so that values producing identical prices count as identical."""
     if not results:
         return {"overall_stability": 0.0}
 
@@ -107,11 +116,9 @@ def _feature_consistency(results: list[dict]) -> dict[str, Any]:
             continue
 
         if all(isinstance(v, (int, float)) for v in values):
-            if len(values) < 2:
-                scores[feat] = 1.0
-            else:
-                vs = variance_stats(values)
-                scores[feat] = max(0.0, 1.0 - vs["cv"] / 100.0)
+            snapped = [_snap_for_stability(v, feat) for v in values]
+            most_common_count = Counter(snapped).most_common(1)[0][1]
+            scores[feat] = most_common_count / len(snapped)
         else:
             most_common_count = Counter(values).most_common(1)[0][1]
             scores[feat] = most_common_count / len(values)
