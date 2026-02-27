@@ -63,8 +63,8 @@ These are written down before any experimental data is collected. If any fail, t
 - % of predictions within 10% of actual sale price
 
 **Feature consistency (the smoking gun):**
-- Across 5 repeats, how often does the LLM assign the same trim_tier, market_demand, depreciation_rate, mileage_assessment, comparable_market to the same vehicle?
-- Reported as % agreement per feature and overall feature stability score.
+- Across repeated runs (recommend **N=50**), how often does the LLM assign the same trim_tier, market_demand, depreciation_rate, mileage_assessment, comparable_market to the same vehicle?
+- Reported as % agreement per feature and overall feature stability score, plus **confidence intervals** for aggregate comparisons.
 
 **Cost:**
 - Total tokens per prediction

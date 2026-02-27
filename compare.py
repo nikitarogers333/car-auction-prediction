@@ -24,7 +24,7 @@ from typing import Any
 
 from config import COMPARISON_TEMPERATURE, DEFAULT_N_REPEATS
 from pipeline import run_pipeline
-from scoring import mae, variance_stats
+from scoring import mae, variance_stats, bootstrap_mean_ci
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 EVAL_DATA_PATH = PROJECT_ROOT / "data" / "eval_dataset.csv"
@@ -263,7 +263,7 @@ def _compute_summary(
     vehicle_metrics: dict[str, list[dict]],
     pipelines: dict[str, str],
 ) -> dict[str, dict[str, Any]]:
-    summary = {}
+    summary: dict[str, dict[str, Any]] = {}
     for label in pipelines:
         vms = vehicle_metrics.get(label, [])
         if not vms:
@@ -276,6 +276,10 @@ def _compute_summary(
         within10 = [v["within_10pct"] for v in vms]
         retries = [v["mean_retries"] for v in vms]
 
+        mae_ci = bootstrap_mean_ci(maes, n_boot=1000, ci=0.95, seed=42) if maes else None
+        cv_ci = bootstrap_mean_ci(cvs, n_boot=1000, ci=0.95, seed=42) if cvs else None
+        vr_ci = bootstrap_mean_ci(valid_rates, n_boot=1000, ci=0.95, seed=42) if valid_rates else None
+
         s: dict[str, Any] = {
             "n_vehicles": n,
             "mean_valid_rate": round(sum(valid_rates) / n, 4) if n else 0,
@@ -283,11 +287,28 @@ def _compute_summary(
             "mean_mae": round(sum(maes) / len(maes), 2) if maes else 0,
             "pct_within_10": round(sum(within10) / n * 100, 1) if n else 0,
             "mean_retries": round(sum(retries) / n, 2) if n else 0,
+            "ci95_mean_mae": {
+                "low": round(mae_ci["ci_low"], 2),
+                "high": round(mae_ci["ci_high"], 2),
+            } if mae_ci else None,
+            "ci95_mean_cv": {
+                "low": round(cv_ci["ci_low"], 2),
+                "high": round(cv_ci["ci_high"], 2),
+            } if cv_ci else None,
+            "ci95_mean_valid_rate": {
+                "low": round(vr_ci["ci_low"], 4),
+                "high": round(vr_ci["ci_high"], 4),
+            } if vr_ci else None,
         }
 
         if label in ("E5", "A'"):
             stabs = [v.get("feature_stability", 0) for v in vms]
             s["mean_feature_stability"] = round(sum(stabs) / len(stabs), 4) if stabs else 0
+            stab_ci = bootstrap_mean_ci(stabs, n_boot=1000, ci=0.95, seed=42) if stabs else None
+            s["ci95_mean_feature_stability"] = {
+                "low": round(stab_ci["ci_low"], 4),
+                "high": round(stab_ci["ci_high"], 4),
+            } if stab_ci else None
 
         summary[label] = s
     return summary
@@ -410,7 +431,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="E3 vs E5 vs RF vs XGB comparison experiment")
     parser.add_argument("--data", type=str, default=None, help="Path to eval CSV")
     parser.add_argument("--n-vehicles", type=int, default=None, help="Limit vehicles")
-    parser.add_argument("--n-repeats", type=int, default=DEFAULT_N_REPEATS)
+    parser.add_argument("--n-repeats", type=int, default=DEFAULT_N_REPEATS, help="Repeats per vehicle per pipeline (recommend 50+ for stats)")
     parser.add_argument("--provider", type=str, default="openai", choices=["openai", "claude"])
     parser.add_argument("--mock", action="store_true", help="Use mock LLM")
     parser.add_argument("--output", type=str, default=None, help="Output JSON path")

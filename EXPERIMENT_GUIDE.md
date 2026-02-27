@@ -45,7 +45,7 @@ LLM picks feature values freely (no schema enforcement) -> same pricing formula 
 
 ```bash
 # Full run with real LLM (requires API keys)
-python3 compare.py --provider openai --n-vehicles 20 --n-repeats 5
+python3 compare.py --provider openai --n-vehicles 20 --n-repeats 50
 
 # Quick test with mock LLM
 python3 compare.py --mock --n-vehicles 10 --n-repeats 3
@@ -89,7 +89,7 @@ Full results are saved to `data/comparison_results.json` with per-vehicle metric
 
 **Ground truth formula is deliberately different from the pricing formula.** The eval dataset uses exponential depreciation, quadratic mileage, polynomial condition bonuses, and interaction effects. The E5 pricing formula uses linear depreciation, mileage buckets, and additive adjustments. If they were identical, Pipeline B would win trivially.
 
-**N repeats = 5.** Each vehicle runs through each pipeline 5 times with the same inputs. This lets us measure: (a) how much the final price varies, and (b) for E5, how often the LLM assigns the same features.
+**N repeats = 50 (recommended).** Because LLM outputs are non-deterministic, comparisons between pipelines should be based on distributions, not single outputs. Run each vehicle through each pipeline **~50 times** (or more) with the same inputs, then report mean metrics and confidence intervals.
 
 ---
 
